@@ -18,22 +18,21 @@ import * as spl from "@solana/spl-token";
 import bs58 from "bs58";
 import path from "path";
 import fs from "fs";
-import { Program } from "@coral-xyz/anchor";
+import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import axios from "axios";
-import * as anchor from "@coral-xyz/anchor";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
 
 export async function buyBundle() {
-	const provider = new anchor.AnchorProvider(new anchor.web3.Connection(rpc), new anchor.Wallet(wallet), { commitment: "confirmed" });
-
+	const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
+        setProvider(provider);
 	// Initialize pumpfun anchor
-	const IDL_PumpFun = JSON.parse(fs.readFileSync("./pumpfun-IDL.json", "utf-8")) as anchor.Idl;
+	const IDL_PumpFun = JSON.parse(fs.readFileSync("./pumpfun-IDL.json", "utf-8")) as Idl;
 
-	const program = new anchor.Program(IDL_PumpFun, PUMP_PROGRAM, provider);
+	const program = new Program(IDL_PumpFun, provider);
 
 	// Start create bundle
 	const bundledTxns: VersionedTransaction[] = [];
@@ -108,6 +107,7 @@ export async function buyBundle() {
 	console.log(`Mint: ${mintKp.publicKey.toBase58()}`);
 
 	const [bondingCurve] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintKp.publicKey.toBytes()], program.programId);
+        const associatedBondingCurve = spl.getAssociatedTokenAddressSync(mintKp.publicKey, bondingCurve, true);
 	const [metadata] = PublicKey.findProgramAddressSync(
 		[Buffer.from("metadata"), MPL_TOKEN_METADATA_PROGRAM_ID.toBytes(), mintKp.publicKey.toBytes()],
 		MPL_TOKEN_METADATA_PROGRAM_ID
@@ -121,16 +121,22 @@ export async function buyBundle() {
 	const account7 = metadata;
 
 	const createIx = await program.methods
-		.create(name, symbol, metadata_uri)
+		.create(name, symbol, metadata_uri, wallet.publicKey)
 		.accounts({
-			mint: account1,
-			mintAuthority: account2,
-			systemProgram: SystemProgram.programId,
-			tokenProgram: spl.TOKEN_PROGRAM_ID,
-			associatedTokenProgram: spl.ASSOCIATED_TOKEN_PROGRAM_ID,
-			rent: SYSVAR_RENT_PUBKEY,
-			eventAuthority,
-			program: PUMP_PROGRAM,
+		        mint: mintKp.publicKey,
+        mintAuthority: PublicKey.findProgramAddressSync([Buffer.from("mint-authority")], PUMP_PROGRAM)[0],
+        bondingCurve: bondingCurve,
+        associatedBondingCurve: spl.getAssociatedTokenAddressSync(mintKp.publicKey, bondingCurve, true),
+        global: PublicKey.findProgramAddressSync([Buffer.from("global")], PUMP_PROGRAM)[0],
+        mplTokenMetadata: MPL_TOKEN_METADATA_PROGRAM_ID,
+        metadata: metadata,
+        user: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: spl.TOKEN_PROGRAM_ID,
+        associatedTokenProgram: spl.ASSOCIATED_TOKEN_PROGRAM_ID,
+        rent: SYSVAR_RENT_PUBKEY,
+        eventAuthority: new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
+        program: PUMP_PROGRAM,
 		})
 		.instruction();
 
@@ -151,7 +157,14 @@ export async function buyBundle() {
 	const buyIx = await program.methods
 		.buy(amount, solAmount)
 		.accounts({
-			systemProgram: SystemProgram.programId,
+			        global: global, // Aus config importiert
+        feeRecipient: feeRecipient, // Aus config importiert
+        mint: mintKp.publicKey, // Mint des Tokens
+        bondingCurve: bondingCurve, // Berechnet mit PublicKey.findProgramAddressSync
+        associatedBondingCurve: spl.getAssociatedTokenAddressSync(mintKp.publicKey, bondingCurve, true), // ATA der Bonding Curve
+        associatedUser: ata, // ATA des Käufers (bereits erstellt)
+        user: wallet.publicKey, // Käufer-Wallet
+        systemProgram: SystemProgram.programId,
 			tokenProgram: spl.TOKEN_PROGRAM_ID,
 			rent: SYSVAR_RENT_PUBKEY,
 			eventAuthority,
@@ -181,11 +194,10 @@ export async function buyBundle() {
 	bundledTxns.push(fullTX);
 
 	// -------- step 3: create swap txns --------
-	const txMainSwaps: VersionedTransaction[] = await createWalletSwaps(blockhash, keypairs, lookupTableAccount, bondingCurve, mintKp.publicKey, program);
+	const txMainSwaps: VersionedTransaction[] = await createWalletSwaps(blockhash, keypairs, lookupTableAccount, bondingCurve, associatedBondingCurve, mintKp.publicKey, program);
 	bundledTxns.push(...txMainSwaps);
 
 	// -------- step 4: send bundle --------
-	/*
         // Simulate each transaction
         for (const tx of bundledTxns) {
             try {
@@ -202,7 +214,6 @@ export async function buyBundle() {
                 console.error("Error during simulation:", error);
             }
         }
-        */
 
 	await sendBundle(bundledTxns);
 }
@@ -254,6 +265,13 @@ async function createWalletSwaps(
 			const buyIx = await program.methods
 				.buy(amount, solAmount)
 				.accounts({
+		global: global,
+        feeRecipient: feeRecipient,
+        mint: mint,
+        bondingCurve: bondingCurve,
+        associatedBondingCurve: associatedBondingCurve,
+        associatedUser: ataAddress,
+        user: keypair.publicKey,
 					systemProgram: SystemProgram.programId,
 					tokenProgram: spl.TOKEN_PROGRAM_ID,
 					rent: SYSVAR_RENT_PUBKEY,
@@ -267,14 +285,15 @@ async function createWalletSwaps(
 
 
 		const message = new TransactionMessage({
-			payerKey: keypair.publicKey,
+			payerKey: payer.publicKey,
 			recentBlockhash: blockhash,
 			instructions: instructionsForChunk,
 		}).compileToV0Message([lut]);
+		const versionedTx = new VersionedTransaction(message);
 
 		const serializedMsg = message.serialize();
-		console.log("Txn size:", message.length);
-		if (message.length > 1232) {
+		console.log("Txn size:", serializedMsg.length);
+		if (serializedMsg.length > 1232) {
 			console.log("tx too big");
 		}
 
@@ -303,7 +322,7 @@ function chunkArray<T>(array: T[], size: number): T[][] {
 }
 
 export async function sendBundle(bundledTxns: VersionedTransaction[]) {
-	/*
+	
     // Simulate each transaction
     for (const tx of bundledTxns) {
         try {
@@ -319,7 +338,7 @@ export async function sendBundle(bundledTxns: VersionedTransaction[]) {
             console.error("Error during simulation:", error);
         }
     }
-    //*/
+    
 
 	try {
 		const bundleId = await searcherClient.sendBundle(new JitoBundle(bundledTxns, bundledTxns.length));

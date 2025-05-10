@@ -137,8 +137,14 @@ export async function sellXPercentageRAY() {
 			sellTotalAmount += transferAmount; // Keep track to sell at the end
 			console.log(`Sending ${transferAmount / 1e6} from dev wallet.`);
 
-			const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, PayerTokenATA, mintKp.publicKey);
-
+			const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(
+			  payer.publicKey,
+			  PayerTokenATA,
+			  payer.publicKey,
+			  new PublicKey(poolInfo.mint),
+			  spl.TOKEN_PROGRAM_ID,
+			  spl.ASSOCIATED_TOKEN_PROGRAM_ID
+			);
 			const TokenATA = await spl.getAssociatedTokenAddress(new PublicKey(poolInfo.mint), wallet.publicKey);
 			const transferIx = spl.createTransferInstruction(TokenATA, PayerTokenATA, wallet.publicKey, transferAmount);
 

@@ -11,16 +11,19 @@ import { loadKeypairs } from './createKeys';
 import * as spl from '@solana/spl-token';
 import idl from "../pumpfun-IDL.json";
 import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
-import { bs58 } from '@project-serum/anchor/dist/cjs/utils/bytes';
+import bs58 from "bs58";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, 'keyInfo.json');
 
-const provider = new AnchorProvider(connection, wallet as any, {});
+const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
 
 setProvider(provider);
 
-const program = new Program(idl as Idl, PUMP_PROGRAM);
+// Initialize pumpfun anchor
+const IDL_PumpFun = JSON.parse(fs.readFileSync("./pumpfun-IDL.json", "utf-8")) as Idl;
+
+const program = new Program(IDL_PumpFun, provider);
 
 export async function extendLUT() {
     // -------- step 1: ask nessesary questions for LUT build --------
@@ -194,7 +197,7 @@ export async function extendLUT() {
     }
     
     // Add the jito tip to the last txn
-    extendLUTixs4.push(
+    extendLUTixs1.push( //4
         SystemProgram.transfer({
             fromPubkey: payer.publicKey,
             toPubkey: getRandomTipAccount(),
@@ -209,15 +212,15 @@ export async function extendLUT() {
     const { blockhash: block1 } = await connection.getLatestBlockhash();
 
     const extend1 = await buildTxn(extendLUTixs1, block1, lookupTableAccount);
-    const extend2 = await buildTxn(extendLUTixs2, block1, lookupTableAccount);
-    const extend3 = await buildTxn(extendLUTixs3, block1, lookupTableAccount);
-    const extend4 = await buildTxn(extendLUTixs4, block1, lookupTableAccount);
+//    const extend2 = await buildTxn(extendLUTixs2, block1, lookupTableAccount);
+  //  const extend3 = await buildTxn(extendLUTixs3, block1, lookupTableAccount);
+  //  const extend4 = await buildTxn(extendLUTixs4, block1, lookupTableAccount);
 
     bundledTxns1.push(
         extend1,
-        extend2,
-        extend3,
-        extend4,
+//        extend2,
+  //      extend3,
+    //    extend4,
     );
     
 

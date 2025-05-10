@@ -8,10 +8,10 @@ import * as spl from "@solana/spl-token";
 import bs58 from "bs58";
 import path from "path";
 import fs from "fs";
-import * as anchor from "@coral-xyz/anchor";
 import { randomInt } from "crypto";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
+import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -73,12 +73,15 @@ async function sendBundle(bundledTxns: VersionedTransaction[]) {
 }
 
 export async function sellXPercentagePF() {
-	const provider = new anchor.AnchorProvider(new anchor.web3.Connection(rpc), new anchor.Wallet(wallet), { commitment: "confirmed" });
+
+	const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
+
+        setProvider(provider);
 
 	// Initialize pumpfun anchor
-	const IDL_PumpFun = JSON.parse(fs.readFileSync("./pumpfun-IDL.json", "utf-8")) as anchor.Idl;
+	const IDL_PumpFun = JSON.parse(fs.readFileSync("./pumpfun-IDL.json", "utf-8")) as Idl;
 
-	const pfprogram = new anchor.Program(IDL_PumpFun, PUMP_PROGRAM, provider);
+	const pfprogram = new Program(IDL_PumpFun, provider);
 
 	// Start selling
 	const bundledTxns = [];
@@ -133,7 +136,14 @@ export async function sellXPercentagePF() {
 			sellTotalAmount += transferAmount; // Keep track to sell at the end
 			console.log(`Sending ${transferAmount / 1e6} from dev wallet.`);
 
-			const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, PayerTokenATA, payer.publicKey);
+			const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(
+			  payer.publicKey,
+			  PayerTokenATA,
+			  payer.publicKey,
+			  new PublicKey(poolInfo.mint),
+			  spl.TOKEN_PROGRAM_ID,
+			  spl.ASSOCIATED_TOKEN_PROGRAM_ID
+			);
 
 			const TokenATA = await spl.getAssociatedTokenAddress(new PublicKey(poolInfo.mint), wallet.publicKey);
 			const transferIx = spl.createTransferInstruction(TokenATA, PayerTokenATA, wallet.publicKey, transferAmount);

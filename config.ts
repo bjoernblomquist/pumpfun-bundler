@@ -11,7 +11,7 @@ import bs58 from "bs58";
 // PRIV KEY OF DEPLOYER
 export const wallet = Keypair.fromSecretKey(
   bs58.decode(
-    "", 
+    "4zEHaL4dhFqyK2xtQRJ2qCqjhFSDPcYxKwbrDv54YW8w2zCND9vyXr4Rh2FCajKSx3GiGU6wZ8akDxt6h2U6sqW3", 
   ),
 );
 
@@ -19,14 +19,14 @@ export const wallet = Keypair.fromSecretKey(
 // PRIV KEY OF FEEPAYER
 export const payer = Keypair.fromSecretKey(
   bs58.decode(
-    "", 
+    "4zEHaL4dhFqyK2xtQRJ2qCqjhFSDPcYxKwbrDv54YW8w2zCND9vyXr4Rh2FCajKSx3GiGU6wZ8akDxt6h2U6sqW3", 
   ),
 );
 
 
 // ENTER YOUR RPC
 export const rpc =
-  ""; 
+  "https://lb.drpc.org/ogrpc?network=solana&dkey=ArGEWPE3oUAHk2vdeaYQOucgCnWPBk8R8I31ssvAG40d"; 
 
 
 

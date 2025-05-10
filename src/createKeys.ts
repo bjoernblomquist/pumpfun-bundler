@@ -67,7 +67,7 @@ export async function createKeypairs() {
   let wallets: Keypair[] = [];
 
   if (action === 'c') {
-    const numOfWallets = 24; // Hardcode 24 buyer keypairs here.
+    const numOfWallets = 2; // Hardcode 24 buyer keypairs here.
     if (isNaN(numOfWallets) || numOfWallets <= 0) {
       console.log('Invalid number. Please enter a positive integer.');
       return;

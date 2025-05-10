@@ -290,7 +290,7 @@ async function simulateAndWriteBuys() {
 	let totalTokensBought = 0;
 	const buys: { pubkey: PublicKey; solAmount: Number; tokenAmount: BN; percentSupply: number }[] = [];
 
-	for (let it = 0; it <= 24; it++) {
+	for (let it = 0; it <= 2; it++) {
 		let keypair;
 
 		let solInput;
