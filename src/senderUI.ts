@@ -1,5 +1,7 @@
-import { Keypair, PublicKey, SystemProgram, TransactionInstruction, VersionedTransaction, LAMPORTS_PER_SOL, TransactionMessage, Blockhash } from "@solana/web3.js";
+import { ComputeBudgetProgram, Transaction, sendAndConfirmTransaction, Keypair, Connection, PublicKey, SystemProgram, TransactionInstruction, VersionedTransaction, LAMPORTS_PER_SOL, TransactionMessage, Blockhash } from "@solana/web3.js";
 import { loadKeypairs } from "./createKeys";
+import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, createCloseAccountInstruction, createTransferCheckedInstruction, getAssociatedTokenAddress } from "@solana/spl-token";
+import { SPL_ACCOUNT_LAYOUT, TokenAccount } from "@raydium-io/raydium-sdk";
 import { wallet, connection, payer } from "../config";
 import * as spl from "@solana/spl-token";
 import { searcherClient } from "./clients/jito";
@@ -10,6 +12,7 @@ import fs from "fs";
 import path from "path";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
+import base58 from "bs58"
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -27,6 +30,51 @@ interface Buy {
 	percentSupply: number;
 }
 
+const printSOLBalance = async (
+  connection: Connection,
+  pubKey: PublicKey,
+  info: string = ""
+) => {
+  const balance = await connection.getBalance(pubKey);
+  console.log(
+    `${info ? info + " " : ""}${pubKey.toBase58()}:`,
+    balance / LAMPORTS_PER_SOL,
+    `SOL`
+  );
+};
+
+
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function showBundleAndDevBalance() {
+	const keypairs: Keypair[] = loadKeypairs();
+        let existingData: any = {};
+	if (fs.existsSync(keyInfoPath)) {
+		existingData = JSON.parse(fs.readFileSync(keyInfoPath, "utf-8"));
+	}
+	
+	const solAmount = parseFloat(existingData[wallet.publicKey.toString()].solAmount);
+	const balance = await connection.getBalance(wallet.publicKey);
+	console.log(`Dev Wallet       ${wallet.publicKey.toBase58()} IS:`, (balance / LAMPORTS_PER_SOL).toFixed(3), `SOL and SHOULD:`, solAmount, "SOL");
+
+	for (let i = 0; i < keypairs.length; i++) {
+		const keypair = keypairs[i]; // Korrektur: keypair aus Array holen
+		const keypairPubkeyStr = keypair.publicKey.toString();
+
+		if (!existingData[keypairPubkeyStr] || !existingData[keypairPubkeyStr].solAmount) {
+			console.log(`Missing solAmount for wallet ${i + 1}, skipping.`);
+			continue;
+		}
+		const solAmount = parseFloat(existingData[keypairPubkeyStr].solAmount);
+	        const balance = await connection.getBalance(keypair.publicKey);
+	        console.log(`Bundler Wallet ${i + 1} ${keypair.publicKey.toBase58()} IS:`, (balance / LAMPORTS_PER_SOL).toFixed(3), `SOL and SHOULD:`, solAmount , "SOL");
+	}
+}
+
+
 async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = 24): Promise<TransactionInstruction[]> {
 	const keypairs: Keypair[] = loadKeypairs();
 	const ixs: TransactionInstruction[] = [];
@@ -40,9 +88,59 @@ async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = 24
 	if (!existingData[wallet.publicKey.toString()] || !existingData[wallet.publicKey.toString()].solAmount) {
 		console.log(`Missing solAmount for dev wallet, skipping.`);
 	}
+	
+	await printSOLBalance(
+	    connection,
+	    payer.publicKey,
+	    "Payer Wallet"
+	  );
+
+        let completeSolAmountKeypairs = 0;
+	for (let i = 0; i < Math.min(steps, keypairs.length); i++) {
+                const keypair = keypairs[i];
+                const keypairPubkeyStr = keypair.publicKey.toString();
+
+                if (!existingData[keypairPubkeyStr] || !existingData[keypairPubkeyStr].solAmount) {
+                        console.log(`Missing solAmount for wallet ${i + 1}, skipping.`);
+                        continue;
+                }
+
+                completeSolAmountKeypairs += parseFloat(existingData[keypairPubkeyStr].solAmount);
+        }
 
 	const solAmount = parseFloat(existingData[wallet.publicKey.toString()].solAmount);
 
+        let completeSolNeeded = (solAmount * 1.015 + 0.0025) + completeSolAmountKeypairs;
+
+	let currentSolBalance = await connection.getBalance(payer.publicKey);
+
+	const currentSolBalanceInSol = currentSolBalance / 1_000_000_000; // Umrechnung in SOL
+	
+	if (currentSolBalanceInSol < completeSolNeeded) {
+	    console.log(`Insufficient SOL balance. Required: ${completeSolNeeded} SOL, Available: ${currentSolBalanceInSol} SOL`);
+	    console.log(`Please top up your Dev wallet (${payer.publicKey.toBase58()}) with at least ${(completeSolNeeded - currentSolBalanceInSol).toFixed(4)} SOL.`);
+
+	    const proceed = prompt("Type 'check' to recheck the balance after topping up, or 'exit' to abort: ").toLowerCase();
+	    
+	    if (proceed === 'exit') {
+		console.log("Aborting SOL transfer process.");
+		return []; // Rückgabe einer leeren Anweisungsliste, um den Prozess zu beenden
+	    } else if (proceed === 'check') {
+		// Saldo erneut prüfen
+		currentSolBalance = await connection.getBalance(payer.publicKey);
+		const newSolBalanceInSol = currentSolBalance / LAMPORTS_PER_SOL;
+		if (newSolBalanceInSol < completeSolNeeded) {
+		    console.log(`Still insufficient SOL balance. Required: ${completeSolNeeded} SOL, Available: ${newSolBalanceInSol} SOL`);
+		    console.log("Please try again later.");
+		    return []; // Abbruch, falls der Saldo immer noch nicht ausreicht
+		} else {
+		    console.log(`Sufficient SOL balance detected: ${newSolBalanceInSol} SOL. Proceeding...`);
+		}
+	    } else {
+		console.log("Invalid input. Aborting SOL transfer process.");
+		return [];
+	    }
+	}
 	ixs.push(
 		SystemProgram.transfer({
 			fromPubkey: payer.publicKey,
@@ -50,6 +148,8 @@ async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = 24
 			lamports: Math.floor((solAmount * 1.015 + 0.0025) * LAMPORTS_PER_SOL),
 		})
 	);
+	console.log(`\nSent ${(solAmount * 1.015 + 0.0025).toFixed(3)} SOL to Dev Wallet (${wallet.publicKey.toString()})`);
+
 
 	// Loop through the keypairs and process each one
 	for (let i = 0; i < Math.min(steps, keypairs.length); i++) {
@@ -158,7 +258,7 @@ async function processInstructionsSOL(ixs: TransactionInstruction[], blockhash: 
 }
 
 async function sendBundle(txns: VersionedTransaction[]) {
-	/*
+/*	
     // Simulate each transaction
     for (const tx of txns) {
         try {
@@ -174,8 +274,8 @@ async function sendBundle(txns: VersionedTransaction[]) {
             console.error("Error during simulation:", error);
         }
     }
-    */
-
+    
+*/
 	try {
 		const bundleId = await searcherClient.sendBundle(new JitoBundle(txns, txns.length));
 		console.log(`Bundle ${bundleId} sent.`);
@@ -194,89 +294,127 @@ async function sendBundle(txns: VersionedTransaction[]) {
 async function generateATAandSOL() {
 	const jitoTipAmt = +prompt("Jito tip in Sol (Ex. 0.01): ") * LAMPORTS_PER_SOL;
 
-	const { blockhash } = await connection.getLatestBlockhash();
-	const sendTxns: VersionedTransaction[] = [];
-
 	const solIxs = await generateSOLTransferForKeypairs(jitoTipAmt);
 
+	const { blockhash } = await connection.getLatestBlockhash();
+	const sendTxns: VersionedTransaction[] = [];
 	const solTxns = await processInstructionsSOL(solIxs, blockhash);
 	sendTxns.push(...solTxns);
 
 	await sendBundle(sendTxns);
 }
 
-async function createReturns() {
-	const txsSigned: VersionedTransaction[] = [];
-	const keypairs = loadKeypairs();
-	const chunkedKeypairs = chunkArray(keypairs, 7); // EDIT CHUNKS?
+async function gather() {
+  const walletsKP = loadKeypairs();
+  console.log(`Starting gather process for ${walletsKP.length} wallets`);
 
-	const jitoTipIn = prompt("Jito tip in Sol (Ex. 0.01): ");
-	const TipAmt = parseFloat(jitoTipIn) * LAMPORTS_PER_SOL;
+  // Process wallets in parallel
+  await Promise.all(walletsKP.map((kp, i) => processWallet(kp, i, walletsKP.length)));
 
-	const { blockhash } = await connection.getLatestBlockhash();
+  console.log(`Gather process completed for all wallets`);
+}
 
-	// Iterate over each chunk of keypairs
-	for (let chunkIndex = 0; chunkIndex < chunkedKeypairs.length; chunkIndex++) {
-		const chunk = chunkedKeypairs[chunkIndex];
-		const instructionsForChunk: TransactionInstruction[] = [];
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 1000): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      console.warn(`Retry ${i + 1}/${retries} failed. Retrying in ${delayMs}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error("Retry logic failed");
+}
 
-		// Iterate over each keypair in the chunk to create swap instructions
-		for (let i = 0; i < chunk.length; i++) {
-			const keypair = chunk[i];
-			console.log(`Processing keypair ${i + 1}/${chunk.length}:`, keypair.publicKey.toString());
+async function processWallet(kp: Keypair, index: number, totalWallets: number): Promise<void> {
+  console.log(`Processing wallet ${index + 1}/${totalWallets} - PublicKey: ${kp.publicKey.toBase58()}`);
 
-			const balance = await connection.getBalance(keypair.publicKey);
+  try {
+    // Fetch account info with retry
+    const accountInfo = await withRetry(() => connection.getAccountInfo(kp.publicKey));
+    const ixs: TransactionInstruction[] = [];
+    const accounts: TokenAccount[] = [];
 
-			const sendSOLixs = SystemProgram.transfer({
-				fromPubkey: keypair.publicKey,
-				toPubkey: payer.publicKey,
-				lamports: balance,
-			});
+    // Fetch SOL balance and add transfer instruction
+    if (accountInfo) {
+      const solBal = await withRetry(() => connection.getBalance(kp.publicKey));
+      console.log(`Wallet ${index + 1} SOL balance: ${solBal / 1_000_000_000} SOL`);
+      ixs.push(
+        SystemProgram.transfer({
+          fromPubkey: kp.publicKey,
+          toPubkey: payer.publicKey,
+          lamports: solBal,
+        })
+      );
+    } else {
+      console.log(`No account info found for wallet ${index + 1}`);
+    }
 
-			instructionsForChunk.push(sendSOLixs);
-		}
+    // Fetch token accounts with retry
+    const tokenAccounts = await withRetry(() =>
+      connection.getTokenAccountsByOwner(kp.publicKey, { programId: TOKEN_PROGRAM_ID }, "confirmed")
+    );
 
-		if (chunkIndex === chunkedKeypairs.length - 1) {
-			const tipSwapIxn = SystemProgram.transfer({
-				fromPubkey: payer.publicKey,
-				toPubkey: getRandomTipAccount(),
-				lamports: BigInt(TipAmt),
-			});
-			instructionsForChunk.push(tipSwapIxn);
-			console.log("Jito tip added :).");
-		}
+    if (tokenAccounts.value.length > 0) {
+      console.log(`Found ${tokenAccounts.value.length} token accounts for wallet ${index + 1}`);
+      for (const { pubkey, account } of tokenAccounts.value) {
+        accounts.push({
+          pubkey,
+          programId: account.owner,
+          accountInfo: SPL_ACCOUNT_LAYOUT.decode(account.data),
+        });
+      }
+    } else {
+      console.log(`No token accounts found for wallet ${index + 1}`);
+    }
 
-		const lut = new PublicKey(poolInfo.addressLUT.toString());
+    // Process token accounts
+    for (const account of accounts) {
+      const baseAta = await getAssociatedTokenAddress(account.accountInfo.mint, payer.publicKey);
+      const tokenAccount = account.pubkey;
+      const tokenBalance = await withRetry(() => connection.getTokenAccountBalance(account.pubkey));
+      console.log(`Token balance: ${tokenBalance.value.amount} (decimals: ${tokenBalance.value.decimals})`);
 
-		const message = new TransactionMessage({
-			payerKey: payer.publicKey,
-			recentBlockhash: blockhash,
-			instructions: instructionsForChunk,
-		}).compileToV0Message([poolInfo.addressLUT]);
+      ixs.push(
+        createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, baseAta, payer.publicKey, account.accountInfo.mint),
+        createTransferCheckedInstruction(
+          tokenAccount,
+          account.accountInfo.mint,
+          baseAta,
+          kp.publicKey,
+          BigInt(tokenBalance.value.amount),
+          tokenBalance.value.decimals
+        ),
+        createCloseAccountInstruction(tokenAccount, payer.publicKey, kp.publicKey)
+      );
+    }
 
-		const versionedTx = new VersionedTransaction(message);
+    // Send transaction if there are instructions
+    if (ixs.length) {
+      const tx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 220_000 }),
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 350_000 }),
+        ...ixs
+      );
+      tx.feePayer = payer.publicKey;
 
-		const serializedMsg = versionedTx.serialize();
-		console.log("Txn size:", serializedMsg.length);
-		if (serializedMsg.length > 1232) {
-			console.log("tx too big");
-		}
+      // Fetch fresh blockhash to avoid expiration
+      tx.recentBlockhash = (await withRetry(() => connection.getLatestBlockhash())).blockhash;
 
-		console.log(
-			"Signing transaction with chunk signers",
-			chunk.map((kp) => kp.publicKey.toString())
-		);
+      // console.log(await connection.simulateTransaction(tx))
 
-		versionedTx.sign([payer]);
-
-		for (const keypair of chunk) {
-			versionedTx.sign([keypair]);
-		}
-
-		txsSigned.push(versionedTx);
-	}
-
-	await sendBundle(txsSigned);
+      // Send and confirm transaction with retry
+      const sig = await withRetry(() =>
+        sendAndConfirmTransaction(connection, tx, [payer, kp], { commitment: "confirmed",skipPreflight: true, })
+      );
+      console.log(`Closed and gathered SOL & Token from wallet ${index + 1}: https://solscan.io/tx/${sig}`);
+    } else {
+      console.log(`No instructions to process for wallet ${index + 1}`);
+    }
+  } catch (error) {
+    console.error(`Error processing wallet ${index + 1}:`, error);
+  }
 }
 
 async function simulateAndWriteBuys() {
@@ -290,7 +428,7 @@ async function simulateAndWriteBuys() {
 	let totalTokensBought = 0;
 	const buys: { pubkey: PublicKey; solAmount: Number; tokenAmount: BN; percentSupply: number }[] = [];
 
-	for (let it = 0; it <= 2; it++) {
+	for (let it = 0; it <= 2; it++) { //24 wallets
 		let keypair;
 
 		let solInput;
@@ -332,11 +470,11 @@ async function simulateAndWriteBuys() {
 		totalTokensBought += tokensBought;
 	}
 
-	console.log("Final real sol reserves: ", initialRealSolReserves / LAMPORTS_PER_SOL);
-	console.log("Final real token reserves: ", initialRealTokenReserves / tokenDecimals);
-	console.log("Final virtual token reserves: ", initialVirtualTokenReserves / tokenDecimals);
-	console.log("Total tokens bought: ", totalTokensBought / tokenDecimals);
-	console.log("Total % of tokens bought: ", (totalTokensBought / tokenTotalSupply) * 100);
+	console.log("Final real sol reserves:", initialRealSolReserves / LAMPORTS_PER_SOL);
+	console.log("Final real token reserves:", initialRealTokenReserves / tokenDecimals);
+	console.log("Final virtual token reserves:", initialVirtualTokenReserves / tokenDecimals);
+	console.log("Total tokens bought:", totalTokensBought / tokenDecimals);
+	console.log(`Total % of tokens bought: ${((totalTokensBought / tokenTotalSupply) * 100).toFixed(2)}%`);
 	console.log(); // \n
 
 	const confirm = prompt("Do you want to use these buys? (yes/no): ").toLowerCase();
@@ -374,14 +512,20 @@ export async function sender() {
 	let running = true;
 
 	while (running) {
-		console.log("\nBuyer UI:");
-		console.log("1. Create LUT");
-		console.log("2. Extend LUT Bundle");
-		console.log("3. Simulate Buys");
-		console.log("4. Send Simulation SOL Bundle");
-		console.log("5. Reclaim Buyers Sol");
+		console.log("╔═══════════════════════════════════════════════╗");
+		console.log("║       🛒  Options  🛒                         ║");
+		console.log("╠═══════════════════════════════════════════════╣");
+		console.log("║ 1. 📝  Create LUT                             ║");
+		console.log("║ 2. 📚  Extend LUT Bundle                      ║");
+		console.log("║ 3. 🔄  Simulate Buys                          ║");
+		console.log("║ 4. 💸  Send Sim SOL from Payer to real Bundle ║");
+		console.log("║ 5. 📊  Show Sim & Real Balance                ║");
+		console.log("║ 6. 🔙  Gather ALL SOL&Tok -> Payer            ║");
+		console.log("╠═══════════════════════════════════════════════╣");
+		console.log("║  Type 'exit' to quit.                         ║");
+		console.log("╚═══════════════════════════════════════════════╝\n");
 
-		const answer = prompt("Choose an option or 'exit': "); // Use prompt-sync for user input
+		const answer = prompt("👉 Choose between 1–6 or 'exit': ");
 
 		switch (answer) {
 			case "1":
@@ -397,7 +541,10 @@ export async function sender() {
 				await generateATAandSOL();
 				break;
 			case "5":
-				await createReturns();
+				await showBundleAndDevBalance();
+				break;
+			case "6":
+				await gather();
 				break;
 			case "exit":
 				running = false;

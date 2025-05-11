@@ -23,8 +23,40 @@ import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import axios from "axios";
 
+// Pfad zur JSON-Datei ( Passe den Dateinamen und Pfad an )
+const jsonFilePath = "./metadata/token.json";
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
+
+interface TokenData {
+  name: string;
+  symbol: string;
+  description: string;
+  twitter?: string;
+  telegram?: string;
+  website?: string;
+}
+
+async function loadTokenData(): Promise<TokenData> {
+  try {
+    // Read JSON file synchronously
+    const jsonData = fs.readFileSync(jsonFilePath, "utf-8");
+    const tokenData: TokenData = JSON.parse(jsonData);
+
+    // Log the loaded data
+    console.log(`\n🎉 Token Name: ${tokenData.name} ✨`);
+    console.log(`💰 Symbol: ${tokenData.symbol} 🚀`);
+    console.log(`📝 Description: ${tokenData.description} 📚`);
+    console.log(`🐦 Twitter: ${tokenData.twitter || "N/A"} 🔗`);
+    console.log(`📨 Telegram: ${tokenData.telegram || "N/A"} 💬`);
+    console.log(`🌐 Website: ${tokenData.website || "N/A"} 🖥️\n`);
+
+    return tokenData;
+  } catch (error: any) {
+    console.error("❌ Fehler beim Einlesen der JSON-Datei:", error.message);
+    throw error; // Rethrow to handle in the caller
+  }
+}
 
 export async function buyBundle() {
 	const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
@@ -54,16 +86,37 @@ export async function buyBundle() {
 	}
 
 	// -------- step 1: ask nessesary questions for pool build --------
+        /* Manuelle Abfrage
 	const name = prompt("Name of your token: ");
 	const symbol = prompt("Symbol of your token: ");
 	const description = prompt("Description of your token: ");
 	const twitter = prompt("Twitter of your token: ");
 	const telegram = prompt("Telegram of your token: ");
 	const website = prompt("Website of your token: ");
+        */
+        // Automatisch aus File
+	// Load token data
+	let tokenData: TokenData;
+	try {
+	tokenData = await loadTokenData();
+	} catch (error) {
+	console.error("Failed to load token data, exiting...");
+	process.exit(1);
+	}
+
+	// Abfrage, ob die Token-Daten korrekt sind
+	const confirmation = prompt("Token Data correct? (yes/no): ").toLowerCase();
+	if (confirmation !== "yes") {
+        	console.log("🔙 Exit, back to Menu...");
+	        return; // Beendet die Funktion und "springt" zurück
+	}
+
+	const { name, symbol, description, twitter, telegram, website } = tokenData;
+
 	const tipAmt = +prompt("Jito tip in SOL: ") * LAMPORTS_PER_SOL;
 
 	// -------- step 2: build pool init + dev snipe --------
-	const files = await fs.promises.readdir("./img");
+	const files = await fs.promises.readdir("./metadata/img");
 	if (files.length == 0) {
 		console.log("No image found in the img folder");
 		return;
@@ -72,7 +125,7 @@ export async function buyBundle() {
 		console.log("Multiple images found in the img folder, please only keep one image");
 		return;
 	}
-	const data: Buffer = fs.readFileSync(`./img/${files[0]}`);
+	const data: Buffer = fs.readFileSync(`./metadata/img/${files[0]}`);
 
 	let formData = new FormData();
 	if (data) {
@@ -85,9 +138,10 @@ export async function buyBundle() {
 	formData.append("name", name);
 	formData.append("symbol", symbol);
 	formData.append("description", description);
-	formData.append("twitter", twitter);
-	formData.append("telegram", telegram);
-	formData.append("website", website);
+	// Only append optional fields if they are defined
+	if (twitter) formData.append("twitter", twitter);
+	if (telegram) formData.append("telegram", telegram);
+	if (website) formData.append("website", website);
 	formData.append("showName", "true");
 
 	let metadata_uri;
@@ -153,6 +207,7 @@ export async function buyBundle() {
 	// Calculate SOL amount based on tokenAmount
 	const amount = new BN(keypairInfo.tokenAmount);
 	const solAmount = new BN(100000 * keypairInfo.solAmount * LAMPORTS_PER_SOL);
+	console.log(`Dev Wallet: ${wallet.publicKey.toString()} SolAmount: ${solAmount} Jito: ${tipAmt}`);
 
 	const buyIx = await program.methods
 		.buy(amount, solAmount)
@@ -199,7 +254,7 @@ export async function buyBundle() {
 
 	// -------- step 4: send bundle --------
         // Simulate each transaction
-        for (const tx of bundledTxns) {
+        /*for (const tx of bundledTxns) {
             try {
                 const simulationResult = await connection.simulateTransaction(tx, { commitment: "processed" });
                 console.log(simulationResult);
@@ -213,7 +268,7 @@ export async function buyBundle() {
             } catch (error) {
                 console.error("Error during simulation:", error);
             }
-        }
+        }*/
 
 	await sendBundle(bundledTxns);
 }
@@ -261,6 +316,8 @@ async function createWalletSwaps(
 			// Calculate SOL amount based on tokenAmount
 			const amount = new BN(keypairInfo.tokenAmount);
 			const solAmount = new BN(100000 * keypairInfo.solAmount * LAMPORTS_PER_SOL);
+			console.log(`Bundle ${i} Wallet: ${keypair.publicKey.toString()} SolAmount: ${solAmount}`);
+
 
 			const buyIx = await program.methods
 				.buy(amount, solAmount)
