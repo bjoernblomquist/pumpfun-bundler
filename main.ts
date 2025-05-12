@@ -1,4 +1,4 @@
-import { createKeypairs } from "./src/createKeys";
+import { createKeypairs,createDevKeys, showKeypairs } from "./src/createKeys";
 import { buyBundle } from "./src/jitoPool";
 import { sender } from "./src/senderUI";
 import { sellXPercentagePF } from "./src/sellFunc";
@@ -28,31 +28,39 @@ async function main() {
 	console.log("╔═══════════════════════════════════════════════╗");
 	console.log("║              🪙  PF Bundler  🪙               ║");
 	console.log("╠═══════════════════════════════════════════════╣");
-	console.log("║ 1. 🔑  Create Keypairs                        ║");
-	console.log("║ 2. 📋  Launch Tools                           ║");
-	console.log("║ 3. 🛠️   Create Pool Bundle                     ║");
-	console.log("║ 4. 🚀  Sell % Supply on Pump.Fun              ║");
-	console.log("║ 5. 💰  Sell % of Supply on Raydium            ║");
+	console.log("║ 1. 🗝️   Create Bundle Keypairs                 ║");
+	console.log("║ 2. 🔐  Create Dev Keypair                     ║");
+	console.log("║ 3. 🔍  Show all Keypairs                      ║");
+	console.log("║ 4. 📋  Launch Tools                           ║");
+	console.log("║ 5. 🛠️   Create Pool Bundle                     ║");
+	console.log("║ 6. 🚀  Sell % Supply on Pump.Fun              ║");
+	console.log("║ 7. 💰  Sell % of Supply on Raydium            ║");
 	console.log("╠═══════════════════════════════════════════════╣");
 	console.log("║  Type 'exit' to quit.                         ║");
 	console.log("╚═══════════════════════════════════════════════╝\n");
 
-	const answer = prompt("👉 Choose between 1–5 or 'exit': ");
+	const answer = prompt("👉 Choose between 1–7 or 'exit': ");
 
 		switch (answer) {
 			case "1":
 				await createKeypairs();
 				break;
 			case "2":
-				await sender();
+				await createDevKeys();
 				break;
 			case "3":
-				await buyBundle();
+				await showKeypairs();
 				break;
 			case "4":
-				await sellXPercentagePF();
+				await sender();
 				break;
 			case "5":
+				await buyBundle();
+				break;
+			case "6":
+				await sellXPercentagePF();
+				break;
+			case "7":
 				await sellXPercentageRAY();
 				break;
 			case "exit":

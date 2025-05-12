@@ -13,6 +13,7 @@ import path from "path";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import base58 from "bs58"
+import {NUM_OF_WALLETS} from "../config";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -49,33 +50,135 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function showBundleAndDevBalance() {
-	const keypairs: Keypair[] = loadKeypairs();
-        let existingData: any = {};
-	if (fs.existsSync(keyInfoPath)) {
-		existingData = JSON.parse(fs.readFileSync(keyInfoPath, "utf-8"));
-	}
-	
-	const solAmount = parseFloat(existingData[wallet.publicKey.toString()].solAmount);
-	const balance = await connection.getBalance(wallet.publicKey);
-	console.log(`Dev Wallet       ${wallet.publicKey.toBase58()} IS:`, (balance / LAMPORTS_PER_SOL).toFixed(3), `SOL and SHOULD:`, solAmount, "SOL");
+async function calculateLaunchFees(numBundlerWallets: number, jitoTip: number = 0.001 * LAMPORTS_PER_SOL): Promise<{
+  devWalletFees: number;
+  bundlerWalletFees: number[];
+  payerWalletFees: number;
+  totalFees: number;
+}> {
+  const LAMPORTS_PER_SOL = 1_000_000_000;
+  const SIGNATURE_FEE = 0.000005 * LAMPORTS_PER_SOL; // 0.000005 SOL per signature
+  const COMPUTE_UNIT_PRICE = 220_000; // microLamports
+  const COMPUTE_UNIT_LIMIT = 350_000; // units
+  const COMPUTE_FEE = (COMPUTE_UNIT_PRICE * COMPUTE_UNIT_LIMIT) / 1_000_000; // ~0.000077 SOL
+  const ATA_FEE = 0.00203928 * LAMPORTS_PER_SOL; // ~0.00203928 SOL per ATA
+  const BONDING_CURVE_FEE = 0.00203928 * LAMPORTS_PER_SOL; // Assume same as ATA for simplicity
+  const METADATA_FEE = 0.008 * LAMPORTS_PER_SOL; // Rough estimate for metadata account
 
-	for (let i = 0; i < keypairs.length; i++) {
-		const keypair = keypairs[i]; // Korrektur: keypair aus Array holen
-		const keypairPubkeyStr = keypair.publicKey.toString();
+  // Dev Wallet: Pool creation + buy transaction
+  const devPoolCreation = {
+    signatures: 4, // Payer, dev, mint, program (rough estimate)
+    atas: 1, // Dev wallet ATA
+    otherAccounts: 2, // Bonding curve + metadata
+    computeUnits: 1, // One transaction
+  };
+  const devBuy = {
+    signatures: 2, // Payer, dev
+    atas: 0, // ATA already created
+    otherAccounts: 0,
+    computeUnits: 1,
+  };
+  const lutCreation = {
+        signatures: 2,
+        accounts: 1, // LUT account
+        computeUnits: 1,
+    };
+  const lutFees =
+        lutCreation.signatures * SIGNATURE_FEE +
+        0.00089088 * LAMPORTS_PER_SOL + // LUT rent exemption
+        lutCreation.computeUnits * COMPUTE_FEE +
+        jitoTip; // Jito tip for 1 bundle
+  const devFees =
+    (devPoolCreation.signatures + devBuy.signatures) * SIGNATURE_FEE +
+    (devPoolCreation.atas + devBuy.atas) * ATA_FEE +
+    devPoolCreation.otherAccounts * BONDING_CURVE_FEE +
+    METADATA_FEE +
+    (devPoolCreation.computeUnits + devBuy.computeUnits) * COMPUTE_FEE;
 
-		if (!existingData[keypairPubkeyStr] || !existingData[keypairPubkeyStr].solAmount) {
-			console.log(`Missing solAmount for wallet ${i + 1}, skipping.`);
-			continue;
-		}
-		const solAmount = parseFloat(existingData[keypairPubkeyStr].solAmount);
-	        const balance = await connection.getBalance(keypair.publicKey);
-	        console.log(`Bundler Wallet ${i + 1} ${keypair.publicKey.toBase58()} IS:`, (balance / LAMPORTS_PER_SOL).toFixed(3), `SOL and SHOULD:`, solAmount , "SOL");
-	}
+  // Bundler Wallets: Each has one buy transaction
+  const bundlerBuy = {
+    signatures: 2, // Payer, bundler
+    atas: 1, // One ATA per wallet
+    otherAccounts: 0,
+    computeUnits: 1,
+  };
+  const bundlerFees = Array(numBundlerWallets).fill(
+    bundlerBuy.signatures * SIGNATURE_FEE +
+      bundlerBuy.atas * ATA_FEE +
+      bundlerBuy.otherAccounts * BONDING_CURVE_FEE +
+      bundlerBuy.computeUnits * COMPUTE_FEE
+  );
+
+  // Payer Wallet: Signs all transactions + pays Jito tips
+  const numBundles = 1 + Math.ceil(numBundlerWallets / 6); // 1 for pool creation + buy, additional for bundler wallet chunks (6 per chunk)
+  const payerFees =
+    (devPoolCreation.signatures + devBuy.signatures + numBundlerWallets * bundlerBuy.signatures) * SIGNATURE_FEE +
+    numBundles * jitoTip;
+
+  // Total Fees
+  const totalFees = devFees + bundlerFees.reduce((sum, fee) => sum + fee, 0) + payerFees + lutFees;
+
+  return {
+    devWalletFees: devFees / LAMPORTS_PER_SOL, // Convert to SOL
+    bundlerWalletFees: bundlerFees.map(fee => fee / LAMPORTS_PER_SOL), // Array of fees in SOL
+    payerWalletFees: payerFees + lutFees / LAMPORTS_PER_SOL, // In SOL
+    totalFees: totalFees / LAMPORTS_PER_SOL, // In SOL
+  };
 }
 
+async function showBundleAndDevBalance() {
+    const keypairs: Keypair[] = loadKeypairs();
+    let existingData: any = {};
+    if (fs.existsSync(keyInfoPath)) {
+        existingData = JSON.parse(fs.readFileSync(keyInfoPath, "utf-8"));
+    }
 
-async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = 24): Promise<TransactionInstruction[]> {
+    const fees = await calculateLaunchFees(keypairs.length, 0.001 * LAMPORTS_PER_SOL);
+
+    let totalSolRequiredForPayer = 0; // Variable zur Speicherung des Gesamt-SOL-Bedarfs
+
+    // Dev Wallet
+    const devSolAmount = parseFloat(existingData[wallet.publicKey.toString()]?.solAmount || 0);
+    const devBalance = await connection.getBalance(wallet.publicKey);
+    const devTotalRequired = devSolAmount + fees.devWalletFees; // Erwartete SOL + Fees
+    totalSolRequiredForPayer += devTotalRequired; // Zum Gesamtbedarf hinzufügen
+    console.log(`\n=== Dev Wallet ===`);
+    console.log(`Public Key: ${wallet.publicKey.toBase58()}`);
+    console.log(`Current Balance: ${(devBalance / LAMPORTS_PER_SOL).toFixed(3)} SOL`);
+    console.log(`Buy SOL: ${devSolAmount.toFixed(3)} SOL`);
+    console.log(`Total Required (Expected + Fees): ${devTotalRequired.toFixed(3)} SOL`);
+
+    // Bundle Wallets
+    for (let i = 0; i < keypairs.length; i++) {
+        const keypair = keypairs[i];
+        const keypairPubkeyStr = keypair.publicKey.toString();
+
+        if (!existingData[keypairPubkeyStr] || !existingData[keypairPubkeyStr].solAmount) {
+            console.log(`Missing solAmount for wallet ${i + 1}, skipping.`);
+            continue;
+        }
+        const solAmount = parseFloat(existingData[keypairPubkeyStr].solAmount);
+        const balance = await connection.getBalance(keypair.publicKey);
+        const bundlerTotalRequired = solAmount + fees.bundlerWalletFees[i]; // Erwartete SOL + Fees
+        totalSolRequiredForPayer += bundlerTotalRequired; // Zum Gesamtbedarf hinzufügen
+        console.log(`\nBundler Wallet ${i + 1}`);
+        console.log(`Public Key: ${keypair.publicKey.toBase58()}`);
+        console.log(`Current Balance: ${(balance / LAMPORTS_PER_SOL).toFixed(3)} SOL`);
+        console.log(`Buy SOL: ${solAmount.toFixed(3)} SOL`);
+        console.log(`Total Required (Expected + Fees): ${bundlerTotalRequired.toFixed(3)} SOL`);
+    }
+
+    // Payer Wallet
+    console.log(`\n=== Payer Wallet ===`);
+    const payerBalance = await connection.getBalance(payer.publicKey);
+    console.log(`Public Key: ${payer.publicKey.toBase58()}`);
+    console.log(`Current Balance: ${(payerBalance / LAMPORTS_PER_SOL).toFixed(3)} SOL`);
+    console.log(`Total SOL Required for All Wallets (Expected + Fees) on Payer Wallet for Launch: ${totalSolRequiredForPayer.toFixed(3)} SOL`);
+    console.log(`\n=== Total Estimated Fees for Launch ===`);
+    console.log(`Total Fees with jitoTip 0.001 used for Launch: ${fees.totalFees.toFixed(3)} SOL`);
+}
+
+async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = NUM_OF_WALLETS): Promise<TransactionInstruction[]> {
 	const keypairs: Keypair[] = loadKeypairs();
 	const ixs: TransactionInstruction[] = [];
 
@@ -428,17 +531,44 @@ async function simulateAndWriteBuys() {
 	let totalTokensBought = 0;
 	const buys: { pubkey: PublicKey; solAmount: Number; tokenAmount: BN; percentSupply: number }[] = [];
 
-	for (let it = 0; it <= 2; it++) { //24 wallets
+        // Variables to store min and max SOL for bundle wallets
+        let minSol: number | undefined;
+        let maxSol: number | undefined;
+
+	for (let it = 0; it <= NUM_OF_WALLETS; it++) { 
 		let keypair;
 
 		let solInput;
 		if (it === 0) {
-			solInput = prompt(`Enter the amount of SOL for dev wallet: `);
+			solInput = prompt(`Enter the amount of SOL for dev wallet: \n`);
 			solInput = Number(solInput) * 1.21;
 			keypair = wallet;
 		} else {
-			solInput = +prompt(`Enter the amount of SOL for wallet ${it}: `);
-			keypair = keypairs[it - 1];
+	          if (it === 1) {
+			// Prompt for min and max SOL only once before processing bundle wallets
+			minSol = +prompt(`Enter the minimum SOL amount for bundle wallets: `);
+			maxSol = +prompt(`Enter the maximum SOL amount for bundle wallets: \n`);
+			
+			// Validate min and max inputs
+			if (isNaN(minSol) || isNaN(maxSol) || minSol < 0 || maxSol < minSol) {
+			    console.log(`Invalid min/max SOL values, skipping wallet ${it}.`);
+			    continue;
+			}
+			
+		    }
+
+		    // Ensure minSol and maxSol are defined before using them
+		    if (minSol === undefined || maxSol === undefined) {
+			console.log(`Min/max SOL values not set, skipping wallet ${it}.`);
+			continue;
+		    }
+		    // Generate random SOL amount between min and max (2 decimal places)
+		    const randomSol = Number(
+			(Math.random() * (maxSol - minSol) + minSol).toFixed(2)
+		    );
+		    solInput = randomSol;
+		    keypair = keypairs[it - 1];
+		
 		}
 
 		const solAmount = solInput * LAMPORTS_PER_SOL;
@@ -519,7 +649,7 @@ export async function sender() {
 		console.log("║ 2. 📚  Extend LUT Bundle                      ║");
 		console.log("║ 3. 🔄  Simulate Buys                          ║");
 		console.log("║ 4. 💸  Send Sim SOL from Payer to real Bundle ║");
-		console.log("║ 5. 📊  Show Sim & Real Balance                ║");
+		console.log("║ 5. 📊  Show Simulated & Real Balance          ║");
 		console.log("║ 6. 🔙  Gather ALL SOL&Tok -> Payer            ║");
 		console.log("╠═══════════════════════════════════════════════╣");
 		console.log("║  Type 'exit' to quit.                         ║");

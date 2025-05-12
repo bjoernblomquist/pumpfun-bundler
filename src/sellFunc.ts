@@ -12,6 +12,7 @@ import { randomInt } from "crypto";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
+import {NUM_OF_WALLETS} from "../config";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -186,7 +187,7 @@ export async function sellXPercentagePF() {
 		}
 	}
 
-	const payerNum = randomInt(0, 24);
+	const payerNum = randomInt(0, NUM_OF_WALLETS);
 	const payerKey = keypairs[payerNum];
 
 	const sellPayerIxs = [];

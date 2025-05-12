@@ -3,11 +3,57 @@ import * as fs from 'fs';
 import promptSync from 'prompt-sync';
 import path from 'path';
 import bs58 from 'bs58';
+import {NUM_OF_WALLETS, payer, wallet} from "../config";
 
 const prompt = promptSync();
 
 const keypairsDir = path.join(__dirname, 'keypairs');
 const keyInfoPath = path.join(__dirname, 'keyInfo.json');
+const keysFilePath = path.join(__dirname, 'keyDev.json');
+
+// Definieren des KeyObject-Interfaces
+interface KeyObject {
+  timestamp: number;
+  date: string;
+  publicKey: string;
+  privateKey: string;
+}
+
+// Funktion zum Generieren eines Keypairs
+function generateKeys(): KeyObject {
+  // Generiere einen neuen Keypair
+  const keypair: Keypair = Keypair.generate();
+  const publicKey: string = keypair.publicKey.toBase58();
+  const privateKey: string = bs58.encode(keypair.secretKey);
+
+  const now: Date = new Date();
+  const timestamp: number = now.getTime();
+  const dateString: string = now.toISOString();
+
+  return {
+    timestamp,
+    date: dateString,
+    publicKey,
+    privateKey,
+  };
+}
+
+// Funktion zum Speichern eines Key-Objekts
+function saveKey(keyObject: KeyObject): void {
+  let keys: KeyObject[] = [];
+  // Falls die Datei bereits existiert, lade den Inhalt
+  if (fs.existsSync(keysFilePath)) {
+    try {
+      const fileData: string = fs.readFileSync(keysFilePath, 'utf8');
+      keys = JSON.parse(fileData) as KeyObject[];
+    } catch (err) {
+      console.error('Error in reading file:', err);
+    }
+  }
+  // Füge den neuen Key hinzu und speichere die Datei
+  keys.push(keyObject);
+  fs.writeFileSync(keysFilePath, JSON.stringify(keys, null, 2), 'utf8');
+}
 
 interface IPoolInfo {
   [key: string]: any;
@@ -22,8 +68,8 @@ if (!fs.existsSync(keypairsDir)) {
 function generateWallets(numOfWallets: number): Keypair[] {
   let wallets: Keypair[] = [];
   for (let i = 0; i < numOfWallets; i++) {
-    const wallet = Keypair.generate();
-    wallets.push(wallet);
+    const walletw = Keypair.generate();
+    wallets.push(walletw);
   }
   return wallets;
 }
@@ -53,8 +99,8 @@ function updatePoolInfo(wallets: Keypair[]) {
 
   // Update wallet-related information
   poolInfo.numOfWallets = wallets.length;
-  wallets.forEach((wallet, index) => {
-    poolInfo[`pubkey${index + 1}`] = wallet.publicKey.toString();
+  wallets.forEach((walletw, index) => {
+    poolInfo[`pubkey${index + 1}`] = walletw.publicKey.toString();
   });
 
   // Write updated data back to poolInfo.json
@@ -62,27 +108,24 @@ function updatePoolInfo(wallets: Keypair[]) {
 }
 
 export async function createKeypairs() {
-  console.log('WARNING: If you create new ones, ensure you don\'t have SOL, OR ELSE IT WILL BE GONE.');
-  const action = prompt('Do you want to (c)reate new wallets or (u)se existing ones? (c/u): ');
+  console.log('WARNING: If you create new ones, ensure you don\'t have SOL in old ones OR ELSE IT WILL BE GONE.');
+  const action = prompt('Do you want to (c)reate new wallets? Else press ENTER:');
   let wallets: Keypair[] = [];
 
   if (action === 'c') {
-    const numOfWallets = 2; // Hardcode 24 buyer keypairs here.
+    const numOfWallets = NUM_OF_WALLETS; 
     if (isNaN(numOfWallets) || numOfWallets <= 0) {
       console.log('Invalid number. Please enter a positive integer.');
       return;
     }
 
     wallets = generateWallets(numOfWallets);
-    wallets.forEach((wallet, index) => {
-      saveKeypairToFile(wallet, index);
-      console.log(`Wallet ${index + 1} Public Key: ${wallet.publicKey.toString()}`);
-    });
-  } else if (action === 'u') {
-    wallets = readKeypairs();
-    wallets.forEach((wallet, index) => {
-      console.log(`Read Wallet ${index + 1} Public Key: ${wallet.publicKey.toString()}`);
-      console.log(`Read Wallet ${index + 1} Private Key: ${bs58.encode(wallet.secretKey)}\n`);
+    console.log('\nWallet Information:\n');
+
+    wallets.forEach((walletw, index) => {
+      saveKeypairToFile(walletw, index);
+      console.log(`Bundle Wallet ${index + 1} Public Key: ${walletw.publicKey.toString()}`);
+      console.log(`Bundle Wallet ${index + 1} Private Key: ${bs58.encode(walletw.secretKey)}\n`);
     });
   } else {
     console.log('Invalid option. Please enter "c" for create or "u" for use existing.');
@@ -90,7 +133,33 @@ export async function createKeypairs() {
   }
 
   updatePoolInfo(wallets);
-  console.log(`${wallets.length} wallets have been processed.`);
+}
+
+export async function showKeypairs() {
+  let wallets: Keypair[] = [];
+
+    wallets = readKeypairs();
+    console.log('\nWallet Information:\n');
+    wallets.forEach((walletw, index) => {
+      console.log(`Bundle Wallet ${index + 1} Public Key: ${walletw.publicKey.toString()}`);
+      console.log(`Bundle Wallet ${index + 1} Private Key: ${bs58.encode(walletw.secretKey)}\n`);
+    });
+      console.log(`Dev Wallet Public Key: ${wallet.publicKey.toString()}\nDev Wallet Private Key: ${bs58.encode(wallet.secretKey)}\n`);
+      console.log(`Payer Wallet (SOL from here will be distributed to Dev and Bundle Wallets): ${payer.publicKey.toString()}\n`);
+
+}
+
+function printDevWalletKeys(keyObject: KeyObject): void {
+  console.log(`Dev Wallet Public Key: ${keyObject.publicKey}`);
+  console.log(`Dev Wallet Private Key: ${keyObject.privateKey}`);
+}
+
+export async function createDevKeys() {  
+  console.log('\nNew Dev Keys will be generated:\n');
+  const newKey = generateKeys();
+  printDevWalletKeys(newKey); 
+  saveKey(newKey);
+  console.log('PLEASE add the Dev Key now to the Config!\n');
 }
 
 export function loadKeypairs(): Keypair[] {

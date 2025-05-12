@@ -94,7 +94,8 @@ export async function buyBundle() {
 	const telegram = prompt("Telegram of your token: ");
 	const website = prompt("Website of your token: ");
         */
-        // Automatisch aus File
+       
+       	// Automatisch aus File
 	// Load token data
 	let tokenData: TokenData;
 	try {
