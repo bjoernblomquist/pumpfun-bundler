@@ -197,7 +197,7 @@ export async function extendLUT() {
     }
     
     // Add the jito tip to the last txn
-    extendLUTixs1.push( //4
+    extendLUTixs2.push( //4
         SystemProgram.transfer({
             fromPubkey: payer.publicKey,
             toPubkey: getRandomTipAccount(),
@@ -212,13 +212,13 @@ export async function extendLUT() {
     const { blockhash: block1 } = await connection.getLatestBlockhash();
 
     const extend1 = await buildTxn(extendLUTixs1, block1, lookupTableAccount);
-//    const extend2 = await buildTxn(extendLUTixs2, block1, lookupTableAccount);
+    const extend2 = await buildTxn(extendLUTixs2, block1, lookupTableAccount);
   //  const extend3 = await buildTxn(extendLUTixs3, block1, lookupTableAccount);
   //  const extend4 = await buildTxn(extendLUTixs4, block1, lookupTableAccount);
 
     bundledTxns1.push(
         extend1,
-//        extend2,
+        extend2,
   //      extend3,
     //    extend4,
     );
