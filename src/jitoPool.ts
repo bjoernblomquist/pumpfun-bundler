@@ -1,4 +1,8 @@
-import { connection, wallet, PUMP_PROGRAM, feeRecipient, eventAuthority, global, MPL_TOKEN_METADATA_PROGRAM_ID, mintAuthority, rpc, payer } from "../config";
+import { connection, wallet,  PUMP_PROGRAM, feeRecipient, eventAuthority, global, MPL_TOKEN_METADATA_PROGRAM_ID, mintAuthority, rpc, payer } from "../config";
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
+         getAssociatedTokenAddressSync,
+         createAssociatedTokenAccountIdempotentInstruction }
+  from "@solana/spl-token";
 import {
 	PublicKey,
 	VersionedTransaction,
@@ -159,15 +163,21 @@ export async function buyBundle() {
 	}
 
 	const mintKp = Keypair.fromSecretKey(Uint8Array.from(bs58.decode(keyInfo.mintPk)));
+	console.log("\n");
 	console.log(`Mint: ${mintKp.publicKey.toBase58()}`);
+	console.log("\n");
 
 	const [bondingCurve] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintKp.publicKey.toBytes()], program.programId);
-        const associatedBondingCurve = spl.getAssociatedTokenAddressSync(mintKp.publicKey, bondingCurve, true);
+        const associatedBondingCurve = spl.getAssociatedTokenAddressSync(
+  mintKp.publicKey,
+  bondingCurve,
+  true,
+  TOKEN_PROGRAM_ID
+);
 	const [metadata] = PublicKey.findProgramAddressSync(
 		[Buffer.from("metadata"), MPL_TOKEN_METADATA_PROGRAM_ID.toBytes(), mintKp.publicKey.toBytes()],
 		MPL_TOKEN_METADATA_PROGRAM_ID
 	);
-
 	const account1 = mintKp.publicKey;
 	const account2 = mintAuthority;
 	const account3 = bondingCurve;
@@ -179,25 +189,40 @@ export async function buyBundle() {
 		.create(name, symbol, metadata_uri, wallet.publicKey)
 		.accounts({
 		        mint: mintKp.publicKey,
-        mintAuthority: PublicKey.findProgramAddressSync([Buffer.from("mint-authority")], PUMP_PROGRAM)[0],
-        bondingCurve: bondingCurve,
-        associatedBondingCurve: spl.getAssociatedTokenAddressSync(mintKp.publicKey, bondingCurve, true),
-        global: PublicKey.findProgramAddressSync([Buffer.from("global")], PUMP_PROGRAM)[0],
-        mplTokenMetadata: MPL_TOKEN_METADATA_PROGRAM_ID,
-        metadata: metadata,
-        user: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-        tokenProgram: spl.TOKEN_PROGRAM_ID,
-        associatedTokenProgram: spl.ASSOCIATED_TOKEN_PROGRAM_ID,
-        rent: SYSVAR_RENT_PUBKEY,
-        eventAuthority: new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
-        program: PUMP_PROGRAM,
+			mintAuthority: mintAuthority,
+			bondingCurve: bondingCurve,
+			associatedBondingCurve: associatedBondingCurve,
+			global:  global,
+			mplTokenMetadata: MPL_TOKEN_METADATA_PROGRAM_ID,
+			metadata: metadata,
+			user: wallet.publicKey,
+			systemProgram: SystemProgram.programId,
+			tokenProgram: TOKEN_PROGRAM_ID,
+			associatedTokenProgram: spl.ASSOCIATED_TOKEN_PROGRAM_ID,
+			rent: SYSVAR_RENT_PUBKEY,
+			eventAuthority: eventAuthority, 
+			program: PUMP_PROGRAM,
 		})
 		.instruction();
 
 	// Get the associated token address
-	const ata = spl.getAssociatedTokenAddressSync(mintKp.publicKey, wallet.publicKey);
-	const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, ata, wallet.publicKey, mintKp.publicKey);
+	//const ata = spl.getAssociatedTokenAddressSync(mintKp.publicKey, wallet.publicKey);
+	const ata = getAssociatedTokenAddressSync(
+  mintKp.publicKey,
+  wallet.publicKey,
+  false,                  // owner is on‐curve
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
+	//const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, ata, wallet.publicKey, mintKp.publicKey);
+const ataIx = createAssociatedTokenAccountIdempotentInstruction(
+  wallet.publicKey,       // funding account
+  ata,
+  wallet.publicKey,
+  mintKp.publicKey,
+  TOKEN_PROGRAM_ID,      // make extra sure these are SPL’s
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
 
 	// Extract tokenAmount from keyInfo for this keypair
 	const keypairInfo = keyInfo[wallet.publicKey.toString()];
@@ -208,23 +233,33 @@ export async function buyBundle() {
 	// Calculate SOL amount based on tokenAmount
 	const amount = new BN(keypairInfo.tokenAmount);
 	const solAmount = new BN(100000 * keypairInfo.solAmount * LAMPORTS_PER_SOL);
-	console.log(`Dev Wallet: ${wallet.publicKey.toString()} SolAmount: ${solAmount} Jito: ${tipAmt}`);
-
+	console.log(`Dev Wallet: ${wallet.publicKey.toString()} SolAmount: ${keypairInfo.solAmount} plus Jito`);
+	console.log("\n");
+	const [creatorVault] = PublicKey.findProgramAddressSync(
+	  [Buffer.from("creator-vault"), wallet.publicKey.toBytes()],
+	  PUMP_PROGRAM,
+	);
+	//NEW
+	const associatedBondingCurveNew = spl.getAssociatedTokenAddressSync(
+	  mintKp.publicKey,
+	  bondingCurve,
+	  true, // allowOwnerOffCurve (bonding curve is a PDA)
+	  TOKEN_PROGRAM_ID // Legacy Token Program
+	);
 	const buyIx = await program.methods
 		.buy(amount, solAmount)
 		.accounts({
-			        global: global, // Aus config importiert
-        feeRecipient: feeRecipient, // Aus config importiert
-        mint: mintKp.publicKey, // Mint des Tokens
-        bondingCurve: bondingCurve, // Berechnet mit PublicKey.findProgramAddressSync
-        associatedBondingCurve: spl.getAssociatedTokenAddressSync(mintKp.publicKey, bondingCurve, true), // ATA der Bonding Curve
-        associatedUser: ata, // ATA des Käufers (bereits erstellt)
-        user: wallet.publicKey, // Käufer-Wallet
-        systemProgram: SystemProgram.programId,
-			tokenProgram: spl.TOKEN_PROGRAM_ID,
-			rent: SYSVAR_RENT_PUBKEY,
-			eventAuthority,
-			program: PUMP_PROGRAM,
+		feeRecipient: feeRecipient, // Aus config importiert
+		mint: mintKp.publicKey, // Mint des Tokens
+		bondingCurve: bondingCurve, // Berechnet mit PublicKey.findProgramAddressSync
+		associatedBondingCurve: associatedBondingCurveNew, 
+		associatedUser: ata, // ATA des Käufers (bereits erstellt)
+		user: wallet.publicKey, // Käufer-Wallet
+		systemProgram: SystemProgram.programId,
+		tokenProgram: TOKEN_PROGRAM_ID,
+		creatorVault:creatorVault,               // NEW
+		eventAuthority: eventAuthority,
+		program: PUMP_PROGRAM,
 		})
 		.instruction();
 
@@ -255,7 +290,7 @@ export async function buyBundle() {
 
 	// -------- step 4: send bundle --------
         // Simulate each transaction
-        /*for (const tx of bundledTxns) {
+/*        for (const tx of bundledTxns) {
             try {
                 const simulationResult = await connection.simulateTransaction(tx, { commitment: "processed" });
                 console.log(simulationResult);
@@ -269,8 +304,8 @@ export async function buyBundle() {
             } catch (error) {
                 console.error("Error during simulation:", error);
             }
-        }*/
-
+        }
+*/
 	await sendBundle(bundledTxns);
 }
 
@@ -284,7 +319,7 @@ async function createWalletSwaps(
 	program: Program
 ): Promise<VersionedTransaction[]> {
 	const txsSigned: VersionedTransaction[] = [];
-	const chunkedKeypairs = chunkArray(keypairs, 6);
+	const chunkedKeypairs = chunkArray(keypairs, 3); //6
 
 	// Load keyInfo data from JSON file
 	let keyInfo: { [key: string]: { solAmount: number; tokenAmount: string; percentSupply: number } } = {};
@@ -292,6 +327,10 @@ async function createWalletSwaps(
 		const existingData = fs.readFileSync(keyInfoPath, "utf-8");
 		keyInfo = JSON.parse(existingData);
 	}
+			const [creatorVault] = PublicKey.findProgramAddressSync(
+			  [Buffer.from("creator-vault"), wallet.publicKey.toBytes()],
+			  PUMP_PROGRAM,
+			);
 
 	// Iterate over each chunk of keypairs
 	for (let chunkIndex = 0; chunkIndex < chunkedKeypairs.length; chunkIndex++) {
@@ -303,9 +342,24 @@ async function createWalletSwaps(
 			const keypair = chunk[i];
 			console.log(`Processing keypair ${i + 1}/${chunk.length}:`, keypair.publicKey.toString());
 
-			const ataAddress = await spl.getAssociatedTokenAddress(mint, keypair.publicKey);
-
-			const createTokenAta = spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, ataAddress, keypair.publicKey, mint);
+//	 	      const ataAddress = await spl.getAssociatedTokenAddress(mint, keypair.publicKey);
+		const ataAddress = getAssociatedTokenAddressSync(
+  mint,
+  keypair.publicKey,
+  false,                  // owner is on‐curve
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
+	//	      const createTokenAta = spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, ataAddress, keypair.publicKey, mint);
+const createTokenAta = createAssociatedTokenAccountIdempotentInstruction(
+  payer.publicKey,       // funding account
+  ataAddress,
+  keypair.publicKey,
+  mint,
+  TOKEN_PROGRAM_ID,      // make extra sure these are SPL’s
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
+		      // Explicitly use TOKEN_PROGRAM_ID for ATA derivation
 
 			// Extract tokenAmount from keyInfo for this keypair
 			const keypairInfo = keyInfo[keypair.publicKey.toString()];
@@ -317,26 +371,24 @@ async function createWalletSwaps(
 			// Calculate SOL amount based on tokenAmount
 			const amount = new BN(keypairInfo.tokenAmount);
 			const solAmount = new BN(100000 * keypairInfo.solAmount * LAMPORTS_PER_SOL);
-			console.log(`Bundle ${i} Wallet: ${keypair.publicKey.toString()} SolAmount: ${solAmount}`);
-
-
+			console.log(`Bundle ${i} Wallet: ${keypair.publicKey.toString()} SolAmount: ${keypairInfo.solAmount}\n`);
 			const buyIx = await program.methods
 				.buy(amount, solAmount)
 				.accounts({
-		global: global,
-        feeRecipient: feeRecipient,
-        mint: mint,
-        bondingCurve: bondingCurve,
-        associatedBondingCurve: associatedBondingCurve,
-        associatedUser: ataAddress,
-        user: keypair.publicKey,
 					systemProgram: SystemProgram.programId,
-					tokenProgram: spl.TOKEN_PROGRAM_ID,
-					rent: SYSVAR_RENT_PUBKEY,
-					eventAuthority,
+					tokenProgram: TOKEN_PROGRAM_ID,
+					feeRecipient: feeRecipient,
+				    	bondingCurve: bondingCurve,
+					associatedUser: ataAddress,
+					user: keypair.publicKey,
+					mint: mint,
+					associatedBondingCurve: associatedBondingCurve,
+					creatorVault: creatorVault,               // NEW
+					eventAuthority: eventAuthority,
 					program: PUMP_PROGRAM,
 				})
 				.instruction();
+
 
 			instructionsForChunk.push(createTokenAta, buyIx);
 		}

@@ -4,6 +4,8 @@ import { sender } from "./src/senderUI";
 import { sellXPercentagePF } from "./src/sellFunc";
 import promptSync from "prompt-sync";
 import { sellXPercentageRAY } from "./src/sellRay";
+import {TELEGRAM_USER_ID,TELEGRAM_API_ID,TELEGRAM_API_HASH,TELEGRAM_PHONE,TELEGRAM_POST_CHANNEL} from "./config";
+import {initializeTelegramClient, sendTelegramMsg} from "./src/telegram"
 
 const prompt = promptSync();
 
@@ -21,9 +23,16 @@ const title = `
 
 async function main() {
 	let running = true;
+        console.log("Starting Pump.fun Bundler...");
+
+        if (!TELEGRAM_API_ID || !TELEGRAM_API_HASH || !TELEGRAM_PHONE || !TELEGRAM_POST_CHANNEL) {
+          console.error('Missing Telegram configuration in .env');
+          process.exit(1);
+        }
+        
+	await initializeTelegramClient();
 
         console.log(title, '\n');
-
 	while (running) {
 	console.log("╔═══════════════════════════════════════════════╗");
 	console.log("║              🪙  PF Bundler  🪙               ║");

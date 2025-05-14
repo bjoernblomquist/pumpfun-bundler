@@ -101,14 +101,6 @@ export async function sellXPercentageRAY() {
 	const supplyPercent = +prompt("Percentage to sell (Ex. 1 for 1%): ") / 100;
 	const jitoTipAmt = +prompt("Jito tip in Sol (Ex. 0.01): ") * LAMPORTS_PER_SOL;
 
-	if (supplyPercent > 0.25) {
-		// protect investors and prevent fraud
-		console.log("You cannot sell over 25% at a time.");
-		console.log("The price impact is too high.");
-
-		return;
-	}
-
 	const keys = await derivePoolKeys(marketID); // Ensure this function is correctly defined to derive necessary keys
 
 	if (keys == null) {
@@ -197,14 +189,6 @@ export async function sellXPercentageRAY() {
 	const { sellIxs } = makeSwap(keys, PayerwSolATA, PayerTokenATA, true, payer, sellTotalAmount);
 
 	console.log(`TOTAL: Selling ${sellTotalAmount / 1e6}.`);
-
-	if (+mintInfo.value.amount * 0.25 <= sellTotalAmount) {
-		// protect investors from fraud and prevent illegal use
-		console.log("Price impact too high.");
-		console.log("Cannot sell more than 25% of supply at a time.");
-
-		return;
-	}
 
 	sellPayerIxs.push(
 		spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, PayerwSolATA, payer.publicKey, spl.NATIVE_MINT),

@@ -194,28 +194,24 @@ export async function sellXPercentagePF() {
 
 	console.log(`TOTAL: Selling ${sellTotalAmount / 1e6}.`);
 
-	if (+mintInfo.value.amount * 0.25 <= sellTotalAmount) {
-		// protect investors from fraud and prevent illegal use
-		console.log("Price impact too high.");
-		console.log("Cannot sell more than 25% of supply at a time.");
-
-		return;
-	}
 
 	const sellIx = await pfprogram.methods
-		.sell(new BN(sellTotalAmount), new BN(0))
-		.accounts({
-			global,
-			feeRecipient,
-			mint: new PublicKey(poolInfo.mint),
-			bondingCurve,
-			user: payer.publicKey,
-			systemProgram: SystemProgram.programId,
-			associatedTokenProgram: spl.ASSOCIATED_TOKEN_PROGRAM_ID,
-			tokenProgram: spl.TOKEN_PROGRAM_ID,
-			program: PUMP_PROGRAM,
-		})
-		.instruction();
+	  .sell(new BN(sellTotalAmount), new BN(0))
+	  .accounts({
+	    global,
+	    feeRecipient,
+	    mint: new PublicKey(poolInfo.mint),
+	    bondingCurve,
+	    associatedBondingCurve,
+	    associatedUser: PayerTokenATA,
+	    user: payer.publicKey,
+	    systemProgram: SystemProgram.programId,
+	    associatedTokenProgram: spl.ASSOCIATED_TOKEN_PROGRAM_ID,
+	    tokenProgram: spl.TOKEN_PROGRAM_ID,
+	    event_authority: new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
+	    program: PUMP_PROGRAM,
+	  })
+	  .instruction();
 
 	sellPayerIxs.push(
 		sellIx,

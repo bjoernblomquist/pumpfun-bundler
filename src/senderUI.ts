@@ -140,7 +140,7 @@ async function showBundleAndDevBalance() {
     // Dev Wallet
     const devSolAmount = parseFloat(existingData[wallet.publicKey.toString()]?.solAmount || 0);
     const devBalance = await connection.getBalance(wallet.publicKey);
-    const devTotalRequired = devSolAmount + fees.devWalletFees; // Erwartete SOL + Fees
+    const devTotalRequired = devSolAmount + fees.devWalletFees + fees.devWalletFees; // Erwartete SOL + Fees
     totalSolRequiredForPayer += devTotalRequired; // Zum Gesamtbedarf hinzufügen
     console.log(`\n=== Dev Wallet ===`);
     console.log(`Public Key: ${wallet.publicKey.toBase58()}`);
@@ -159,7 +159,7 @@ async function showBundleAndDevBalance() {
         }
         const solAmount = parseFloat(existingData[keypairPubkeyStr].solAmount);
         const balance = await connection.getBalance(keypair.publicKey);
-        const bundlerTotalRequired = solAmount + fees.bundlerWalletFees[i]; // Erwartete SOL + Fees
+        const bundlerTotalRequired = solAmount + fees.bundlerWalletFees[i] + fees.bundlerWalletFees[i]; // Erwartete SOL + Fees
         totalSolRequiredForPayer += bundlerTotalRequired; // Zum Gesamtbedarf hinzufügen
         console.log(`\nBundler Wallet ${i + 1}`);
         console.log(`Public Key: ${keypair.publicKey.toBase58()}`);

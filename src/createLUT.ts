@@ -12,6 +12,7 @@ import * as spl from '@solana/spl-token';
 import idl from "../pumpfun-IDL.json";
 import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
 import bs58 from "bs58";
+import {sendTelegramMsg} from "./telegram"
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, 'keyInfo.json');
@@ -69,6 +70,8 @@ export async function extendLUT() {
     }
 
     console.log(`Mint: ${mintKp.publicKey.toString()}`);
+    await sendTelegramMsg(`✅ New Pump.fun Token Mint for Snipe: ${mintKp.publicKey.toString()}`);
+    
     poolInfo.mint = mintKp.publicKey.toString();
     poolInfo.mintPk = bs58.encode(mintKp.secretKey);
     fs.writeFileSync(keyInfoPath, JSON.stringify(poolInfo, null, 2));  
@@ -197,7 +200,7 @@ export async function extendLUT() {
     }
     
     // Add the jito tip to the last txn
-    extendLUTixs2.push( //4
+    extendLUTixs3.push( //4
         SystemProgram.transfer({
             fromPubkey: payer.publicKey,
             toPubkey: getRandomTipAccount(),
@@ -213,13 +216,13 @@ export async function extendLUT() {
 
     const extend1 = await buildTxn(extendLUTixs1, block1, lookupTableAccount);
     const extend2 = await buildTxn(extendLUTixs2, block1, lookupTableAccount);
-  //  const extend3 = await buildTxn(extendLUTixs3, block1, lookupTableAccount);
+    const extend3 = await buildTxn(extendLUTixs3, block1, lookupTableAccount);
   //  const extend4 = await buildTxn(extendLUTixs4, block1, lookupTableAccount);
 
     bundledTxns1.push(
         extend1,
         extend2,
-  //      extend3,
+        extend3,
     //    extend4,
     );
     

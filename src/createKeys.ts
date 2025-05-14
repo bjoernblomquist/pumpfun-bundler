@@ -4,6 +4,7 @@ import promptSync from 'prompt-sync';
 import path from 'path';
 import bs58 from 'bs58';
 import {NUM_OF_WALLETS, payer, wallet} from "../config";
+const configFilePath = path.join(__dirname, '../config.ts');
 
 const prompt = promptSync();
 
@@ -72,6 +73,34 @@ function generateWallets(numOfWallets: number): Keypair[] {
     wallets.push(walletw);
   }
   return wallets;
+}
+
+// Funktion zum Aktualisieren der config.ts Datei
+function updateConfigFile(newPrivateKey: string): void {
+  const configContent = `
+    // PRIV KEY OF DEV
+    export const wallet = Keypair.fromSecretKey(
+      bs58.decode(
+        "${newPrivateKey}",
+      ),
+    );
+  `.trim();
+
+  try {
+    fs.writeFileSync(configFilePath, configContent, 'utf8');
+    console.log('Config file updated with new dev key.');
+  } catch (err) {
+    console.error('Error writing to config file:', err);
+    throw err;
+  }
+}
+
+// Funktion zum Neuladen des config-Moduls
+function reloadConfigModule(): typeof import("../config") {
+  // Clear the module cache for config
+  delete require.cache[require.resolve('../config')];
+  // Reload the config module
+  return require('../config');
 }
 
 function saveKeypairToFile(keypair: Keypair, index: number) {
@@ -158,8 +187,18 @@ export async function createDevKeys() {
   console.log('\nNew Dev Keys will be generated:\n');
   const newKey = generateKeys();
   printDevWalletKeys(newKey); 
+  updateConfigFile(newKey.privateKey);
   saveKey(newKey);
-  console.log('PLEASE add the Dev Key now to the Config!\n');
+   // Lade das config-Modul neu, um den neuen wallet-Wert zu reflektieren
+  try {
+    const updatedConfig = reloadConfigModule();
+    console.log('Config module reloaded. New Dev Wallet Public Key:', updatedConfig.wallet.publicKey.toString());
+  } catch (err) {
+    console.error('Error reloading config module:', err);
+    console.log('Please restart the application to use the new dev key.');
+  }
+
+  console.log('New Dev Key has been saved, old key overwritten, and config updated.\n');
 }
 
 export function loadKeypairs(): Keypair[] {
