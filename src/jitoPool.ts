@@ -1,4 +1,4 @@
-import { connection, wallet,  PUMP_PROGRAM, feeRecipient, eventAuthority, global, MPL_TOKEN_METADATA_PROGRAM_ID, mintAuthority, rpc, payer } from "../config";
+import { connection, wallet, devWalletSellDelay, PUMP_PROGRAM, feeRecipient, eventAuthority, global, MPL_TOKEN_METADATA_PROGRAM_ID, mintAuthority, rpc, payer } from "../config";
 import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
          getAssociatedTokenAddressSync,
          createAssociatedTokenAccountIdempotentInstruction }
@@ -26,6 +26,8 @@ import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import axios from "axios";
+import {sendTelegramMsg} from "./telegram";
+import { sellDevWalletPF } from "./sellFunc"; // Import the sellDevWalletPF function
 
 // Pfad zur JSON-Datei ( Passe den Dateinamen und Pfad an )
 const jsonFilePath = "./metadata/token.json";
@@ -206,23 +208,21 @@ export async function buyBundle() {
 		.instruction();
 
 	// Get the associated token address
-	//const ata = spl.getAssociatedTokenAddressSync(mintKp.publicKey, wallet.publicKey);
 	const ata = getAssociatedTokenAddressSync(
-  mintKp.publicKey,
-  wallet.publicKey,
-  false,                  // owner is on‐curve
-  TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
-	//const ataIx = spl.createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, ata, wallet.publicKey, mintKp.publicKey);
-const ataIx = createAssociatedTokenAccountIdempotentInstruction(
-  wallet.publicKey,       // funding account
-  ata,
-  wallet.publicKey,
-  mintKp.publicKey,
-  TOKEN_PROGRAM_ID,      // make extra sure these are SPL’s
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
+	  mintKp.publicKey,
+	  wallet.publicKey,
+	  false,                  // owner is on‐curve
+	  TOKEN_PROGRAM_ID,
+	  ASSOCIATED_TOKEN_PROGRAM_ID
+	);
+	const ataIx = createAssociatedTokenAccountIdempotentInstruction(
+	  wallet.publicKey,       // funding account
+	  ata,
+	  wallet.publicKey,
+	  mintKp.publicKey,
+	  TOKEN_PROGRAM_ID,      // make extra sure these are SPL’s
+	  ASSOCIATED_TOKEN_PROGRAM_ID
+	);
 
 	// Extract tokenAmount from keyInfo for this keypair
 	const keypairInfo = keyInfo[wallet.publicKey.toString()];
@@ -289,27 +289,10 @@ const ataIx = createAssociatedTokenAccountIdempotentInstruction(
 	bundledTxns.push(...txMainSwaps);
 
 	// -------- step 4: send bundle --------
-        // Simulate each transaction
-/*        for (const tx of bundledTxns) {
-            try {
-                const simulationResult = await connection.simulateTransaction(tx, { commitment: "processed" });
-                console.log(simulationResult);
-
-                if (simulationResult.value.err) {
-                    console.error("Simulation error for transaction:", simulationResult.value.err);
-                } else {
-                    console.log("Simulation success for transaction. Logs:");
-                    simulationResult.value.logs?.forEach(log => console.log(log));
-                }
-            } catch (error) {
-                console.error("Error during simulation:", error);
-            }
-        }
-*/
-	await sendBundle(bundledTxns);
+	await sendBundle(bundledTxns, mintKp);
 }
 
-async function createWalletSwaps(
+/*async function createWalletSwaps(
 	blockhash: string,
 	keypairs: Keypair[],
 	lut: AddressLookupTableAccount,
@@ -319,7 +302,7 @@ async function createWalletSwaps(
 	program: Program
 ): Promise<VersionedTransaction[]> {
 	const txsSigned: VersionedTransaction[] = [];
-	const chunkedKeypairs = chunkArray(keypairs, 3); //6
+	const chunkedKeypairs = chunkArray(keypairs, 6); //6
 
 	// Load keyInfo data from JSON file
 	let keyInfo: { [key: string]: { solAmount: number; tokenAmount: string; percentSupply: number } } = {};
@@ -342,23 +325,21 @@ async function createWalletSwaps(
 			const keypair = chunk[i];
 			console.log(`Processing keypair ${i + 1}/${chunk.length}:`, keypair.publicKey.toString());
 
-//	 	      const ataAddress = await spl.getAssociatedTokenAddress(mint, keypair.publicKey);
 		const ataAddress = getAssociatedTokenAddressSync(
-  mint,
-  keypair.publicKey,
-  false,                  // owner is on‐curve
-  TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
-	//	      const createTokenAta = spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, ataAddress, keypair.publicKey, mint);
-const createTokenAta = createAssociatedTokenAccountIdempotentInstruction(
-  payer.publicKey,       // funding account
-  ataAddress,
-  keypair.publicKey,
-  mint,
-  TOKEN_PROGRAM_ID,      // make extra sure these are SPL’s
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
+			  mint,
+			  keypair.publicKey,
+			  false,                  // owner is on‐curve
+			  TOKEN_PROGRAM_ID,
+			  ASSOCIATED_TOKEN_PROGRAM_ID
+			);
+			const createTokenAta = createAssociatedTokenAccountIdempotentInstruction(
+			  payer.publicKey,       // funding account
+			  ataAddress,
+			  keypair.publicKey,
+			  mint,
+			  TOKEN_PROGRAM_ID,      // make extra sure these are SPL’s
+			  ASSOCIATED_TOKEN_PROGRAM_ID
+			);
 		      // Explicitly use TOKEN_PROGRAM_ID for ATA derivation
 
 			// Extract tokenAmount from keyInfo for this keypair
@@ -422,19 +403,143 @@ const createTokenAta = createAssociatedTokenAccountIdempotentInstruction(
 		versionedTx.sign([payer]);
 
 		txsSigned.push(versionedTx);
-	}
+	   }
+        }
 
 	return txsSigned;
+}*/
+
+async function createWalletSwaps(
+    blockhash: string,
+    keypairs: Keypair[],
+    lut: AddressLookupTableAccount,
+    bondingCurve: PublicKey,
+    associatedBondingCurve: PublicKey,
+    mint: PublicKey,
+    program: Program
+): Promise<VersionedTransaction[]> {
+    const txsSigned: VersionedTransaction[] = [];
+    const chunkedKeypairs = chunkArray(keypairs, 2); // Chunk into pairs for two buy instructions per tx
+
+    // Load keyInfo data from JSON file
+    let keyInfo: { [key: string]: { solAmount: number; tokenAmount: string; percentSupply: number } } = {};
+    if (fs.existsSync(keyInfoPath)) {
+        const existingData = fs.readFileSync(keyInfoPath, "utf-8");
+        keyInfo = JSON.parse(existingData);
+    }
+
+    const [creatorVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("creator-vault"), wallet.publicKey.toBytes()],
+        PUMP_PROGRAM,
+    );
+
+    // Iterate over each chunk of keypairs (2 keypairs per chunk)
+    for (let chunkIndex = 0; chunkIndex < chunkedKeypairs.length; chunkIndex++) {
+        const chunk = chunkedKeypairs[chunkIndex];
+        const instructionsForChunk: TransactionInstruction[] = [];
+
+        // Determine payerKey: use second keypair if available, otherwise first
+        const payerKey = chunk.length === 2 ? chunk[1].publicKey : chunk[0].publicKey;
+
+        // Iterate over each keypair in the chunk to create swap instructions
+        for (let i = 0; i < chunk.length; i++) {
+            const keypair = chunk[i];
+            console.log(`Processing keypair ${i + 1}/${chunk.length}:`, keypair.publicKey.toString());
+
+            const ataAddress = getAssociatedTokenAddressSync(
+                mint,
+                keypair.publicKey,
+                false,
+                TOKEN_PROGRAM_ID,
+                ASSOCIATED_TOKEN_PROGRAM_ID
+            );
+            const createTokenAta = createAssociatedTokenAccountIdempotentInstruction(
+                payerKey, // Use selected payerKey for funding
+                ataAddress,
+                keypair.publicKey,
+                mint,
+                TOKEN_PROGRAM_ID,
+                ASSOCIATED_TOKEN_PROGRAM_ID
+            );
+
+            // Extract tokenAmount from keyInfo for this keypair
+            const keypairInfo = keyInfo[keypair.publicKey.toString()];
+            if (!keypairInfo) {
+                console.log(`No key info found for keypair: ${keypair.publicKey.toString()}`);
+                continue;
+            }
+
+            // Calculate SOL amount based on tokenAmount
+            const amount = new BN(keypairInfo.tokenAmount);
+            const solAmount = new BN(100000 * keypairInfo.solAmount * LAMPORTS_PER_SOL);
+            console.log(`Bundle ${i} Wallet: ${keypair.publicKey.toString()} SolAmount: ${keypairInfo.solAmount}\n`);
+
+            const buyIx = await program.methods
+                .buy(amount, solAmount)
+                .accounts({
+                    systemProgram: SystemProgram.programId,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                    feeRecipient: feeRecipient,
+                    bondingCurve: bondingCurve,
+                    associatedUser: ataAddress,
+                    user: keypair.publicKey,
+                    mint: mint,
+                    associatedBondingCurve: associatedBondingCurve,
+                    creatorVault: creatorVault,
+                    eventAuthority: eventAuthority,
+                    program: PUMP_PROGRAM,
+                })
+                .instruction();
+
+            instructionsForChunk.push(createTokenAta, buyIx);
+        }
+
+        // Skip if no instructions were created (e.g., due to missing keyInfo)
+        if (instructionsForChunk.length === 0) {
+            console.log(`Skipping chunk ${chunkIndex} due to no valid instructions`);
+            continue;
+        }
+
+        const message = new TransactionMessage({
+            payerKey: payerKey,
+            recentBlockhash: blockhash,
+            instructions: instructionsForChunk,
+        }).compileToV0Message([lut]);
+        const versionedTx = new VersionedTransaction(message);
+
+        const serializedMsg = message.serialize();
+        console.log("Txn size:", serializedMsg.length);
+        if (serializedMsg.length > 1232) {
+            console.log("tx too big");
+            continue;
+        }
+
+        console.log(
+            "Signing transaction with chunk signers",
+            chunk.map((kp) => kp.publicKey.toString())
+        );
+
+        // Sign with all keypairs in the chunk
+        for (const kp of chunk) {
+            if (kp.publicKey.toString() in keyInfo) {
+                versionedTx.sign([kp]);
+            }
+        }
+
+        txsSigned.push(versionedTx);
+    }
+
+    return txsSigned;
 }
 
 function chunkArray<T>(array: T[], size: number): T[][] {
 	return Array.from({ length: Math.ceil(array.length / size) }, (v, i) => array.slice(i * size, i * size + size));
 }
 
-export async function sendBundle(bundledTxns: VersionedTransaction[]) {
+export async function sendBundle(bundledTxns: VersionedTransaction[], mintKp: Keypair) {
 	
     // Simulate each transaction
-    for (const tx of bundledTxns) {
+/*    for (const tx of bundledTxns) {
         try {
             const simulationResult = await connection.simulateTransaction(tx, { commitment: "processed" });
 
@@ -448,15 +553,43 @@ export async function sendBundle(bundledTxns: VersionedTransaction[]) {
             console.error("Error during simulation:", error);
         }
     }
-    
+*/
 
 	try {
 		const bundleId = await searcherClient.sendBundle(new JitoBundle(bundledTxns, bundledTxns.length));
 		console.log(`Bundle ${bundleId} sent.`);
 
-		///*
+		await sendTelegramMsg(
+                `🎉 New Pump.fun Token Mint is LIVE on Solana Chain! 🚀\nMint: ${mintKp.publicKey.toString()}\n\nCheck it out:\n` +
+                `🌐 <a href="https://axiom.trade/t/${mintKp.publicKey.toString()}">Axiom Trade</a>\n` +
+                `📊 <a href="https://gmgn.ai/sol/token/${mintKp.publicKey.toString()}">GMGN</a>\n` +
+                `🔍 <a href="https://dexscreener.com/solana/${mintKp.publicKey.toString()}">Dexscreener</a>`
+                );
+
+	
+	        const salePromise = new Promise<void>((resolve, reject) => {
+                setTimeout(async () => {
+                try {
+                    console.log("Executing dev wallet sale...");
+                    await sellDevWalletPF();
+                    console.log("Dev wallet tokens sold successfully.");
+                    await sendTelegramMsg(`✅ Dev wallet tokens sold for mint: ${mintKp.publicKey.toString()}`);
+                    resolve();
+                } catch (error: any) {
+                    console.error("Error during dev wallet sale:", error.message, error.stack);
+                    await sendTelegramMsg(
+                        `❌ Failed to sell dev wallet tokens for mint: ${mintKp.publicKey.toString()}\nError: ${error.message}`
+                    );
+                    reject(error);
+                }
+            }, devWalletSellDelay * 1000); // Convert seconds to milliseconds
+        });
+
+        // Wait for the sale to complete before allowing the process to proceed
+        await salePromise;
+
 		// Assuming onBundleResult returns a Promise<BundleResult>
-		const result = await new Promise((resolve, reject) => {
+	/*	const result = await new Promise((resolve, reject) => {
 			searcherClient.onBundleResult(
 				(result) => {
 					console.log("Received bundle result:", result);
@@ -468,9 +601,9 @@ export async function sendBundle(bundledTxns: VersionedTransaction[]) {
 				}
 			);
 		});
-
-		console.log("Result:", result);
-		//*/
+        */
+		//console.log("Result:", result);
+		
 	} catch (error) {
 		const err = error as any;
 		console.error("Error sending bundle:", err.message);

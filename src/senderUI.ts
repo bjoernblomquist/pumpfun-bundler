@@ -7,13 +7,24 @@ import * as spl from "@solana/spl-token";
 import { searcherClient } from "./clients/jito";
 import { Bundle as JitoBundle } from "jito-ts/dist/sdk/block-engine/types.js";
 import promptSync from "prompt-sync";
-import { createLUT, extendLUT } from "./createLUT";
+import { createLUT, extendLUT, closeLUTS } from "./createLUT";
 import fs from "fs";
 import path from "path";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import base58 from "bs58"
 import {NUM_OF_WALLETS} from "../config";
+import * as readline from "readline";
+import chalk from "chalk";
+import { exec, spawn} from 'child_process';
+import { promisify } from 'util';
+import fetch from 'node-fetch';
+import { promises as fsPromises } from 'fs';
+import ora from "ora"
+import os from "os";
+import { Worker } from "worker_threads";
+
+const execAsync = promisify(exec);
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -43,7 +54,6 @@ const printSOLBalance = async (
     `SOL`
   );
 };
-
 
 
 function sleep(ms: number) {
@@ -509,7 +519,7 @@ async function processWallet(kp: Keypair, index: number, totalWallets: number): 
 
       // Send and confirm transaction with retry
       const sig = await withRetry(() =>
-        sendAndConfirmTransaction(connection, tx, [payer, kp], { commitment: "confirmed",skipPreflight: true, })
+        connection.sendTransaction(tx, [payer, kp], { skipPreflight: true, })
       );
       console.log(`Closed and gathered SOL & Token from wallet ${index + 1}: https://solscan.io/tx/${sig}`);
     } else {
@@ -517,6 +527,226 @@ async function processWallet(kp: Keypair, index: number, totalWallets: number): 
     }
   } catch (error) {
     console.error(`Error processing wallet ${index + 1}:`, error);
+  }
+}
+
+
+function promptNew(question: string): Promise<string> {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+        rl.question(question, (answer) => {
+            rl.close();
+            resolve(answer);
+        });
+    });
+}
+
+// Generate a random number between min and max with specified decimal precision
+function getRandomNumber(min: number, max: number, decimalPlaces: number = 3): number {
+    const range = max - min;
+    const random = Math.random(); // Can be replaced with a seeded RNG if needed
+    const scaled = random * range + min;
+    const factor = Math.pow(10, decimalPlaces);
+    return Math.round(scaled * factor) / factor;
+}
+
+const defaultWorkers = Math.max(1, Math.floor(os.cpus().length / 2));
+
+async function genVanity() {
+
+	 console.log("\n=== Generate Vanity Address ===");
+
+  try {
+    // User inputs
+    const prefix = await promptNew("Enter the desired prefix for the address: ");
+    const suffix = await promptNew("Enter the desired suffix for the address: ");
+    const caseSensitiveInput = await promptNew("Case sensitive? (yes/no): ");
+    const caseSensitive = caseSensitiveInput.toLowerCase() === "yes";
+    const workersInput = await promptNew(`Number of worker threads (default: ${defaultWorkers}): `);
+    const numWorkers = parseInt(workersInput) || defaultWorkers;
+
+    // Validation
+    if (!prefix && !suffix) {
+      console.log(chalk.red("Error: At least one of prefix or suffix must be provided."));
+      return;
+    }
+
+    let addressesGenerated = 0;
+    const spinner = ora(`Generating vanity address (0)`).start();
+
+    // Create workers
+    const workers: Worker[] = [];
+    const workerPromises: Promise<{ publicKey: string; secretKey: string; counter: number }>[] = [];
+
+    for (let i = 0; i < numWorkers; i++) {
+      const worker = new Worker(path.join(__dirname, "vanityWorker.js"), {
+        workerData: { prefix, suffix, caseSensitive },
+      });
+      workers.push(worker);
+
+      workerPromises.push(
+        new Promise((resolve) => {
+          worker.on("message", (message: { incrementCounter?: number; keypair?: { publicKey: string; secretKey: string }; counter?: number }) => {
+            if (message.incrementCounter) {
+              addressesGenerated += message.incrementCounter;
+              spinner.text = `Generating vanity address (${addressesGenerated.toLocaleString()})`;
+              spinner.render();
+            } else if (message.keypair) {
+              resolve({ publicKey: message.keypair.publicKey, secretKey: message.keypair.secretKey, counter: message.counter || 0 });
+            }
+          });
+          worker.on("error", (error) => {
+            console.log(chalk.yellow(`Worker error: ${error.message}`));
+          });
+        })
+      );
+    }
+
+    // Wait for the first worker to find a keypair
+    const result = await Promise.race(workerPromises);
+    addressesGenerated += result.counter;
+
+    const privateKeyBase58 = base58.encode(Buffer.from(result.secretKey, "hex"));
+    const successMessage = [
+      `Done after ${addressesGenerated.toLocaleString()} addresses`,
+      chalk.underline.blue("\nPublic Key:"),
+      result.publicKey,
+      chalk.underline.blue("Private Key (Base58):"),
+      privateKeyBase58,
+    ].join("\n");
+
+    spinner.succeed(successMessage);
+
+
+    // Terminate all workers
+    workers.forEach((worker) => worker.terminate());
+  } catch (error) {
+    console.log(chalk.red("Error generating vanity address:"));
+    console.error(error);
+  }
+
+}
+
+// Function to prompt for multi-line input
+async function promptMultiLine(question: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  console.log(question);
+  console.log("Paste your JSON content (press Enter twice to finish):");
+
+  return new Promise((resolve) => {
+    const lines: string[] = [];
+    let isFirstLine = true;
+
+    rl.on("line", (line) => {
+      if (line.trim() === "" && !isFirstLine) {
+        // Stop collecting input on a second consecutive empty line
+        rl.close();
+      } else {
+        lines.push(line);
+        isFirstLine = false;
+      }
+    });
+
+    rl.on("close", () => {
+      resolve(lines.join("\n"));
+    });
+  });
+}
+
+async function saveMetadata() {
+
+	  console.log("\n=== Save Metadata to JSON ===");
+
+  try {
+    // Prompt for multi-line JSON input
+    const metadata = await promptMultiLine("Enter the metadata JSON content:");
+
+    // Trim whitespace and validate JSON
+    const trimmedMetadata = metadata.trim();
+    if (!trimmedMetadata) {
+      console.log(chalk.red("Error: No input provided."));
+      return;
+    }
+
+    // Validate if input is valid JSON
+    try {
+      JSON.parse(trimmedMetadata);
+    } catch (error) {
+      console.log(chalk.red("Error: Invalid JSON format."));
+      return;
+    }
+
+    // Define the file path
+    const dir = "./metadata";
+    const filePath = path.join(dir, "token.json");
+
+    // Ensure the metadata directory exists
+    await fsPromises.mkdir(dir, { recursive: true });
+
+    // Write (or overwrite) the metadata to token.json
+    await fsPromises.writeFile(filePath, trimmedMetadata, "utf8");
+
+    console.log(chalk.green(`Metadata successfully saved to ${filePath}`));
+
+    // Read and display the contents of token.json
+    const fileContent = await fsPromises.readFile(filePath, "utf8");
+    console.log(chalk.blue("\nContents of token.json:"));
+    console.log(JSON.parse(fileContent)); // Pretty-print the JSON content
+  } catch (error) {
+    console.log(chalk.red("Error saving metadata:"));
+  }
+
+}
+
+async function downloadImg() {
+  console.log("\n=== Download Metatoken Image ===");
+  
+  const url = await promptNew("Enter the image URL: ");
+  
+  // Prüfen ob URL mit .jpg endet
+  if (!url.toLowerCase().endsWith('.jpg')) {
+    console.log(chalk.red("Error: URL must end with .jpg"));
+    return;
+  }
+
+  try {
+    // Bild herunterladen
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    // Verzeichnisse für Speicherung
+    const dir1 = '/var/www/html';
+    const dir2 = './metadata/img';
+    const filename = 'token.jpg';
+    
+    // Sicherstellen, dass Verzeichnis ./metadata/img existiert
+    await fsPromises.mkdir(dir2, { recursive: true });
+    
+    // Bild in beide Verzeichnisse speichern
+    await Promise.all([
+      fsPromises.writeFile(path.join(dir1, filename), buffer),
+      fsPromises.writeFile(path.join(dir2, filename), buffer)
+    ]);
+    
+    // Link ausgeben
+    const link = 'http://5.78.72.205/token.jpg';
+    console.log(chalk.green('Image downloaded successfully!'));
+    console.log(chalk.blue(`Access image at: ${link}`));
+    
+  } catch (error) {
+    console.log(chalk.red(`Error downloading image.`));
   }
 }
 
@@ -529,90 +759,109 @@ async function simulateAndWriteBuys() {
 	let initialVirtualTokenReserves = 1073000000 * tokenDecimals;
 	let initialRealTokenReserves = 793100000 * tokenDecimals;
 	let totalTokensBought = 0;
-	const buys: { pubkey: PublicKey; solAmount: Number; tokenAmount: BN; percentSupply: number }[] = [];
 
-        // Variables to store min and max SOL for bundle wallets
-        let minSol: number | undefined;
-        let maxSol: number | undefined;
+	while(true) {
+		const buys: { pubkey: PublicKey; solAmount: Number; tokenAmount: BN; percentSupply: number }[] = [];
 
-	for (let it = 0; it <= NUM_OF_WALLETS; it++) { 
-		let keypair;
+		// Variables to store min and max SOL for bundle wallets
+		let minSol: number | undefined;
+		let maxSol: number | undefined;
 
-		let solInput;
-		if (it === 0) {
-			solInput = prompt(`Enter the amount of SOL for dev wallet: \n`);
-			solInput = Number(solInput) * 1.21;
-			keypair = wallet;
-		} else {
-	          if (it === 1) {
-			// Prompt for min and max SOL only once before processing bundle wallets
-			minSol = +prompt(`Enter the minimum SOL amount for bundle wallets: `);
-			maxSol = +prompt(`Enter the maximum SOL amount for bundle wallets: \n`);
-			
-			// Validate min and max inputs
-			if (isNaN(minSol) || isNaN(maxSol) || minSol < 0 || maxSol < minSol) {
-			    console.log(`Invalid min/max SOL values, skipping wallet ${it}.`);
-			    continue;
+		// Abfrage, ob fixe oder zufällige Beträge verwendet werden sollen
+                const mode = await promptNew(`Enter the mode for SOL amounts (fix/random): `);
+	
+		for (let it = 0; it <= NUM_OF_WALLETS; it++) { 
+			let keypair;
+			let solInput;
+                        
+			if (it === 0) {
+			    // Dev Wallet: Immer fixe Eingabe
+			    solInput = await promptNew(`Enter the amount of SOL for dev wallet: `);
+			    solInput = Number(solInput) * 1.21;
+			    keypair = wallet;
+			} else {
+			    if (mode === 'fix') {
+				// Fixe Beträge
+				solInput = Number(await promptNew(`Enter the amount of SOL for wallet ${it}: `));
+				keypair = keypairs[it - 1];
+			    } else if (mode === 'random') {
+				// Zufällige Beträge
+				if (it === 1) {
+				    // Min und Max nur einmal abfragen
+				    minSol = Number(await promptNew(`Enter the minimum SOL amount for bundle wallets: `));
+				    maxSol = Number(await promptNew(`Enter the maximum SOL amount for bundle wallets: `));
+				    // Validierung der Eingaben
+				    if (isNaN(minSol) || isNaN(maxSol) || minSol < 0 || maxSol < minSol) {
+					console.log(`Invalid min/max SOL values, skipping wallet ${it}.`);
+					return; // oder continue, je nach Kontext
+				    }
+				}
+
+				// Sicherstellen, dass minSol und maxSol definiert sind
+				if (minSol === undefined || maxSol === undefined) {
+				    console.log(`Min/max SOL values not set, skipping wallet ${it}.`);
+				    return; // oder continue
+				}
+
+				// Zufälligen SOL-Betrag zwischen min und max generieren (3 Dezimalstellen)
+				const randomSol = getRandomNumber(minSol, maxSol, 3);
+				solInput = randomSol;
+				keypair = keypairs[it - 1];
+			    } else {
+				console.log(`Invalid mode selected, skipping wallet ${it}.`);
+				return; // oder continue
+			    }
 			}
-			
-		    }
 
-		    // Ensure minSol and maxSol are defined before using them
-		    if (minSol === undefined || maxSol === undefined) {
-			console.log(`Min/max SOL values not set, skipping wallet ${it}.`);
-			continue;
-		    }
-		    // Generate random SOL amount between min and max (2 decimal places)
-		    const randomSol = Number(
-			(Math.random() * (maxSol - minSol) + minSol).toFixed(2)
-		    );
-		    solInput = randomSol;
-		    keypair = keypairs[it - 1];
-		
+			const solAmount = solInput * LAMPORTS_PER_SOL;
+
+			if (isNaN(solAmount) || solAmount <= 0) {
+				console.log(`Invalid input for wallet ${it}, skipping.`);
+				continue;
+			}
+
+			const e = new BN(solAmount);
+			const initialVirtualSolReserves = 30 * LAMPORTS_PER_SOL + initialRealSolReserves;
+			const a = new BN(initialVirtualSolReserves).mul(new BN(initialVirtualTokenReserves));
+			const i = new BN(initialVirtualSolReserves).add(e);
+			const l = a.div(i).add(new BN(1));
+			let tokensToBuy = new BN(initialVirtualTokenReserves).sub(l);
+			tokensToBuy = BN.min(tokensToBuy, new BN(initialRealTokenReserves));
+
+			const tokensBought = tokensToBuy.toNumber();
+			const percentSupply = (tokensBought / tokenTotalSupply) * 100;
+
+			console.log(`Wallet ${it}: Bought ${tokensBought / tokenDecimals} tokens for ${e.toNumber() / LAMPORTS_PER_SOL} SOL`);
+			console.log(`Wallet ${it}: Owns ${percentSupply.toFixed(4)}% of total supply\n`);
+
+			buys.push({ pubkey: keypair.publicKey, solAmount: Number(solInput), tokenAmount: tokensToBuy, percentSupply });
+
+			initialRealSolReserves += e.toNumber();
+			initialRealTokenReserves -= tokensBought;
+			initialVirtualTokenReserves -= tokensBought;
+			totalTokensBought += tokensBought;
 		}
+	
 
-		const solAmount = solInput * LAMPORTS_PER_SOL;
+		console.log("Final real sol reserves:", initialRealSolReserves / LAMPORTS_PER_SOL);
+		console.log("Final real token reserves:", initialRealTokenReserves / tokenDecimals);
+		console.log("Final virtual token reserves:", initialVirtualTokenReserves / tokenDecimals);
+		console.log("Total tokens bought:", totalTokensBought / tokenDecimals);
+		console.log(`Total % of tokens bought: ${((totalTokensBought / tokenTotalSupply) * 100).toFixed(2)}%`);
+		console.log(); // \n
 
-		if (isNaN(solAmount) || solAmount <= 0) {
-			console.log(`Invalid input for wallet ${it}, skipping.`);
-			continue;
+		//const confirm = prompt("Do you want to use these buys? (yes/no): ").toLowerCase();
+		const confirm = (await promptNew("Do you want to use these buys? (yes/no): ")).toLowerCase()
+		if (confirm === "yes") {
+			writeBuysToFile(buys);
+			break;
+		} else {
+			console.log("Simulation aborted. Restarting...");
+			 initialRealSolReserves = 0;
+			 initialVirtualTokenReserves = 1073000000 * tokenDecimals;
+			 initialRealTokenReserves = 793100000 * tokenDecimals;
+			 totalTokensBought = 0;
 		}
-
-		const e = new BN(solAmount);
-		const initialVirtualSolReserves = 30 * LAMPORTS_PER_SOL + initialRealSolReserves;
-		const a = new BN(initialVirtualSolReserves).mul(new BN(initialVirtualTokenReserves));
-		const i = new BN(initialVirtualSolReserves).add(e);
-		const l = a.div(i).add(new BN(1));
-		let tokensToBuy = new BN(initialVirtualTokenReserves).sub(l);
-		tokensToBuy = BN.min(tokensToBuy, new BN(initialRealTokenReserves));
-
-		const tokensBought = tokensToBuy.toNumber();
-		const percentSupply = (tokensBought / tokenTotalSupply) * 100;
-
-		console.log(`Wallet ${it}: Bought ${tokensBought / tokenDecimals} tokens for ${e.toNumber() / LAMPORTS_PER_SOL} SOL`);
-		console.log(`Wallet ${it}: Owns ${percentSupply.toFixed(4)}% of total supply\n`);
-
-		buys.push({ pubkey: keypair.publicKey, solAmount: Number(solInput), tokenAmount: tokensToBuy, percentSupply });
-
-		initialRealSolReserves += e.toNumber();
-		initialRealTokenReserves -= tokensBought;
-		initialVirtualTokenReserves -= tokensBought;
-		totalTokensBought += tokensBought;
-	}
-
-	console.log("Final real sol reserves:", initialRealSolReserves / LAMPORTS_PER_SOL);
-	console.log("Final real token reserves:", initialRealTokenReserves / tokenDecimals);
-	console.log("Final virtual token reserves:", initialVirtualTokenReserves / tokenDecimals);
-	console.log("Total tokens bought:", totalTokensBought / tokenDecimals);
-	console.log(`Total % of tokens bought: ${((totalTokensBought / tokenTotalSupply) * 100).toFixed(2)}%`);
-	console.log(); // \n
-
-	const confirm = prompt("Do you want to use these buys? (yes/no): ").toLowerCase();
-	if (confirm === "yes") {
-		writeBuysToFile(buys);
-	} else {
-		console.log("Simulation aborted. Restarting...");
-		simulateAndWriteBuys(); // Restart the simulation
 	}
 }
 
@@ -642,20 +891,24 @@ export async function sender() {
 	let running = true;
 
 	while (running) {
-		console.log("╔═══════════════════════════════════════════════╗");
-		console.log("║       🛒  Options  🛒                         ║");
-		console.log("╠═══════════════════════════════════════════════╣");
-		console.log("║ 1. 📝  Create LUT                             ║");
-		console.log("║ 2. 📚  Extend LUT Bundle                      ║");
-		console.log("║ 3. 🔄  Simulate Buys                          ║");
-		console.log("║ 4. 💸  Send Sim SOL from Payer to real Bundle ║");
-		console.log("║ 5. 📊  Show Simulated & Real Balance          ║");
-		console.log("║ 6. 🔙  Gather ALL SOL&Tok -> Payer            ║");
-		console.log("╠═══════════════════════════════════════════════╣");
-		console.log("║  Type 'exit' to quit.                         ║");
-		console.log("╚═══════════════════════════════════════════════╝\n");
+		console.log("╔═════════════════════════════════════════════════╗");
+		console.log("║                🛒  Options  🛒                  ║");
+		console.log("╠═════════════════════════════════════════════════╣");
+		console.log("║ 1. 📝  Create LUT                               ║");
+		console.log("║ 2. 📚  Extend LUT Bundle                        ║");
+		console.log("║ 3. 🔄  Simulate Buys                            ║");
+		console.log("║ 4. 💸  Send Sim SOL from Payer to Real Bundle   ║");
+		console.log("║ 5. 📊  Show Simulated & Real Balance            ║");
+		console.log("║ 6. 🔄  Gather and close ALL SOL & Tok -> Payer  ║");
+		console.log("║ 7. 🔒  Close LUT -> Payer                       ║");
+		console.log("║ 8. 🔍  Search for Vanity Address                ║");
+		console.log("║ 9 .💾  Save Metadata in JSON                    ║");
+		console.log("║ 10.📥  Download Metatoken Image                 ║");
+		console.log("╠═════════════════════════════════════════════════╣");
+		console.log("║  Type 'exit' to quit.                           ║");
+		console.log("╚═════════════════════════════════════════════════╝\n");
 
-		const answer = prompt("👉 Choose between 1–6 or 'exit': ");
+		const answer = prompt("👉 Choose between 1–10 or 'exit': ");
 
 		switch (answer) {
 			case "1":
@@ -675,6 +928,18 @@ export async function sender() {
 				break;
 			case "6":
 				await gather();
+				break;
+			case "7":
+				await closeLUTS();
+				break;
+			case "8":
+				await genVanity();
+				break;
+			case "9":
+				await saveMetadata();
+				break;
+			case "10":
+				await downloadImg();
 				break;
 			case "exit":
 				running = false;

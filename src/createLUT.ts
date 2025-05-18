@@ -1,4 +1,4 @@
-import { AddressLookupTableProgram, Keypair, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL, Blockhash, AddressLookupTableAccount, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { AddressLookupTableProgram, Transaction,sendAndConfirmTransaction, Keypair,ComputeBudgetProgram, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL, Blockhash, AddressLookupTableAccount, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import fs from 'fs';
 import path from 'path';
 import { wallet, connection, PUMP_PROGRAM, payer } from '../config';
@@ -13,6 +13,7 @@ import idl from "../pumpfun-IDL.json";
 import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
 import bs58 from "bs58";
 import {sendTelegramMsg} from "./telegram"
+import * as readline from "readline";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, 'keyInfo.json');
@@ -26,6 +27,123 @@ const IDL_PumpFun = JSON.parse(fs.readFileSync("./pumpfun-IDL.json", "utf-8")) a
 
 const program = new Program(IDL_PumpFun, provider);
 
+export async function closeLUTS() {
+        // Assuming you have the LUT address stored in poolInfo
+        let poolInfo: { [key: string]: any } = {};
+        if (fs.existsSync(keyInfoPath)) {
+           const data = fs.readFileSync(keyInfoPath, 'utf-8');
+           poolInfo = JSON.parse(data);
+        }
+  if (!poolInfo.addressLUT) {
+      console.error("LUT address not found in poolInfo");
+    return false;
+  }
+
+  const lookupTableAddress = new PublicKey(poolInfo.addressLUT.toString());
+  console.log("Lookup Table Address:", lookupTableAddress.toBase58());
+
+  // Check LUT state
+  const lutAccount = await connection.getAddressLookupTable(lookupTableAddress);
+  if (!lutAccount.value) {
+      console.error("LUT does not exist");
+    return false;
+  }
+
+if (lutAccount.value.state.deactivationSlot === 0xffffffffffffffffn) {
+      const cooldownTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 15_000_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+        AddressLookupTableProgram.deactivateLookupTable({
+          lookupTable: lookupTableAddress,
+          authority: payer.publicKey,
+        })
+      );
+    // Send cooldownTx without confirmation
+    const coolDownSig = await connection.sendTransaction(cooldownTx, [payer], {
+      skipPreflight: true,
+    });
+
+        console.log("Cool Down Sig (sent, not confirmed):", coolDownSig);
+        console.log("Waiting for cooldown period...");
+
+        // Timer für die Cooldown-Periode (200 Sekunden)
+        const cooldownDuration = 200000; // 200 Sekunden in Millisekunden
+        const startTime = Date.now();
+        const updateLine = (elapsedSeconds: number, remainingSeconds: number) => {
+            readline.cursorTo(process.stdout, 0); // Cursor an den Zeilenanfang setzen
+            process.stdout.write(`Elapsed: ${elapsedSeconds} seconds, Remaining: ${remainingSeconds} seconds`);
+            readline.clearLine(process.stdout, 1); // Rest der Zeile löschen
+        };
+
+        const interval = setInterval(() => {
+            const elapsedTime = Date.now() - startTime;
+            const elapsedSeconds = Math.floor(elapsedTime / 1000);
+            const remainingSeconds = Math.floor((cooldownDuration - elapsedTime) / 1000);
+            if (elapsedTime < cooldownDuration) {
+               updateLine(elapsedSeconds, remainingSeconds);
+	    }
+        }, 1000); // Alle Sekunde aktualisieren
+
+        // Warte auf die Cooldown-Periode
+        await new Promise((resolve) => setTimeout(resolve, cooldownDuration));
+        clearInterval(interval); // Timer stoppen
+
+       // Letzte Zeile abschließen und neue Zeile für die nächste Ausgabe
+        const finalElapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+        readline.cursorTo(process.stdout, 0);
+        process.stdout.write(`Cooldown period ended, elapsed time: ${finalElapsedSeconds} seconds\n`);
+        readline.clearLine(process.stdout, 1);
+
+        // Nach der Cooldown-Periode closeLUTS erneut aufrufen
+        console.log("Attempting to close LUT again...");
+        return await closeLUTS(); // Rekursiver Aufruf
+
+  } else {
+    console.log("LUT is already deactivated at slot:", lutAccount.value.state.deactivationSlot.toString());
+  }
+
+      // Verify LUT state before closing
+    const currentSlot = await connection.getSlot();
+    if (currentSlot <= lutAccount.value.state.deactivationSlot) {
+        console.log(`LUT not yet closable. Current slot: ${currentSlot}, Deactivation slot: ${lutAccount.value.state.deactivationSlot}`);
+        return false;
+    }
+  // Fetch a fresh recentBlockhash for the close transaction
+  const { blockhash } = await connection.getLatestBlockhash();
+  
+    // Proceed to close the LUT
+  const closeTx = new Transaction({
+    recentBlockhash: blockhash,
+    feePayer: payer.publicKey,
+  }).add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 15_000_000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+    AddressLookupTableProgram.closeLookupTable({
+      lookupTable: lookupTableAddress,
+      authority: payer.publicKey,
+      recipient: payer.publicKey,
+    })
+  );
+
+  const closeSig = await connection.sendTransaction(closeTx, [payer]);
+  console.log("Close LUT Sig:", closeSig);
+
+}
+
+function promptNew(question: string): Promise<string> {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+        rl.question(question, (answer) => {
+            rl.close();
+            resolve(answer);
+        });
+    });
+}
+
 export async function extendLUT() {
     // -------- step 1: ask nessesary questions for LUT build --------
     let vanityPK = null;
@@ -33,7 +151,7 @@ export async function extendLUT() {
     const vanityPrompt = prompt('Do you want to import a custom vanity address? (y/n): ').toLowerCase();
     const jitoTipAmt = +prompt('Jito tip in Sol (Ex. 0.01): ') * LAMPORTS_PER_SOL;
     if (vanityPrompt === 'y') {
-        vanityPK = prompt('Enter the private key of the vanity address (bs58): ');
+        vanityPK = await promptNew(`Enter the private key of the vanity address (bs58): `);
     }
 
     // Read existing data from poolInfo.json
@@ -70,7 +188,7 @@ export async function extendLUT() {
     }
 
     console.log(`Mint: ${mintKp.publicKey.toString()}`);
-    await sendTelegramMsg(`✅ New Pump.fun Token Mint for Snipe: ${mintKp.publicKey.toString()}`);
+    await sendTelegramMsg(`✅ New Pump.fun Token Mint for Snipe (will launch soon): ${mintKp.publicKey.toString()}`);
     
     poolInfo.mint = mintKp.publicKey.toString();
     poolInfo.mintPk = bs58.encode(mintKp.secretKey);
@@ -232,9 +350,6 @@ export async function extendLUT() {
     await sendBundle(bundledTxns1);
     
 }
-
-
-
 
 export async function createLUT() {
 

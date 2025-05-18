@@ -75,22 +75,47 @@ function generateWallets(numOfWallets: number): Keypair[] {
   return wallets;
 }
 
-// Funktion zum Aktualisieren der config.ts Datei
+// Funktion zum Aktualisieren der config.ts Datei (nur den wallet private key)
 function updateConfigFile(newPrivateKey: string): void {
-  const configContent = `
-    // PRIV KEY OF DEV
-    export const wallet = Keypair.fromSecretKey(
-      bs58.decode(
-        "${newPrivateKey}",
-      ),
-    );
-  `.trim();
-
   try {
+    // Lese den aktuellen Inhalt der config.ts
+    let configContent = fs.readFileSync(configFilePath, 'utf8');
+
+    // Regex, um den private key in export const wallet zu finden
+    // Passt auf multiline, whitespace, single/double quotes, und trailing comma
+    const walletRegex = /(export\s+const\s+wallet\s*=\s*Keypair\.fromSecretKey\s*\(\s*bs58\.decode\s*\(\s*['"]([^'"]+)['"]\s*,?\s*\)\s*,?\s*\)\s*;)/s;
+
+    // Teste, ob die Regex matched
+    const match = configContent.match(walletRegex);
+    if (match) {
+      // Ersetze den alten private key durch den neuen, behalte die Struktur bei
+      const newKeyString = `export const wallet = Keypair.fromSecretKey(bs58.decode("${newPrivateKey}"));`;
+      configContent = configContent.replace(walletRegex, newKeyString);
+      console.log('Wallet private key found and updated.');
+    } else {
+      // Debugging: Logge den Inhalt von config.ts (sanitized)
+      const sanitizedContent = configContent.replace(/"[^"]+"/g, '"<sanitized-key>"');
+      console.error('Debug: config.ts content (sanitized):\n', sanitizedContent);
+
+      // Finde Zeilen mit "wallet" oder "bs58.decode"
+      const lines = configContent.split('\n');
+      const relevantLines = lines
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => line.includes('wallet') || line.includes('bs58.decode'))
+        .map(({ line, index }) => `Line ${index + 1}: ${line}`);
+      console.error('Debug: Lines containing "wallet" or "bs58.decode":\n', relevantLines.join('\n') || 'None found');
+
+      // Logge die erwartete Regex
+      console.error('Debug: Expected pattern: export const wallet = Keypair.fromSecretKey(bs58.decode("..."));');
+
+      throw new Error('Wallet private key not found in config.ts or format unexpected.');
+    }
+
+    // Schreibe die aktualisierte Datei zurück
     fs.writeFileSync(configFilePath, configContent, 'utf8');
-    console.log('Config file updated with new dev key.');
+    console.log('Config file updated with new dev key, please RESTART.');
   } catch (err) {
-    console.error('Error writing to config file:', err);
+    console.error('Error updating config file:', err);
     throw err;
   }
 }
