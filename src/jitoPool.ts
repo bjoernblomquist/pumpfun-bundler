@@ -27,12 +27,18 @@ import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import axios from "axios";
 import {sendTelegramMsg} from "./telegram";
-import { sellDevWalletPF } from "./sellFunc"; // Import the sellDevWalletPF function
+import { sellDevWalletPF } from "./sellFunc"; 
+import { getMC } from "./utils/getMarketCapSol"; 
+import { Metaplex } from "@metaplex-foundation/js";
+import { createCloseAccountInstruction, getMinimumBalanceForRentExemptAccount, getMint } from "@solana/spl-token";
+import { u8, struct } from '@solana/buffer-layout';
+import { u64, publicKey } from '@solana/buffer-layout-utils';
 
 // Pfad zur JSON-Datei ( Passe den Dateinamen und Pfad an )
 const jsonFilePath = "./metadata/token.json";
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
+const volumeFilePath = path.join(__dirname, "volume.json");
 
 interface TokenData {
   name: string;
@@ -63,6 +69,22 @@ async function loadTokenData(): Promise<TokenData> {
     throw error; // Rethrow to handle in the caller
   }
 }
+
+
+const monitorMarketCap = (bondingCurvePub: PublicKey): Promise<boolean> => {
+    console.log("Monitoring MarketCap...");
+    return new Promise((resolve) => {
+        const monitor = setInterval(async () => {
+            const mc = await getMC(connection, bondingCurvePub);
+            //console.log("🚀 Current Market Cap Sol:", mc);
+/*            if (mc >= MARKET_CAP) {
+                clearInterval(monitor);
+                resolve(true);
+            }*/
+        }, 500);
+    });
+};
+
 
 export async function buyBundle() {
 	const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
@@ -536,6 +558,471 @@ function chunkArray<T>(array: T[], size: number): T[][] {
 	return Array.from({ length: Math.ceil(array.length / size) }, (v, i) => array.slice(i * size, i * size + size));
 }
 
+const getTokenMetadata = async (mintAddress: string, retries: number = 5, delay: number = 100): Promise<any> => {
+    const metaplex = Metaplex.make(connection);
+    const mintPublicKey = new PublicKey(mintAddress);
+
+    const delayFunction = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const nft = await metaplex.nfts().findByMint({ mintAddress: mintPublicKey });
+            return nft.json;
+        } catch (error) {
+            if (attempt < retries) {
+                await delayFunction(delay);
+            } else {
+                return false;
+            }
+        }
+    }
+};
+
+interface VolumeData {
+  [iteration: number]: {
+    buyer: string;
+    seller1: string;
+    seller2: string;
+  };
+}
+
+// Define the structure of the Pump.fun bonding curve
+interface BondingCurveState {
+  virtualTokenReserves: bigint;
+  virtualSolReserves: bigint;
+  realTokenReserves: bigint;
+  realSolReserves: bigint;
+  tokenTotalSupply: bigint;
+  complete: number;
+  mint: PublicKey;
+  global: PublicKey;
+}
+
+// Pump.fun Bonding Curve Layout
+const PUMP_FUN_BONDING_CURVE_LAYOUT = struct<BondingCurveState>([
+  u64('virtualTokenReserves'),
+  u64('virtualSolReserves'),
+  u64('realTokenReserves'),
+  u64('realSolReserves'),
+  u64('tokenTotalSupply'),
+  u8('complete'), // 1 if the bonding curve is complete, 0 if not
+]);
+
+// Function to fetch and decode Pump.fun bonding curve state on-chain
+async function getPumpFunBondingCurveState(tokenMint: PublicKey): Promise<BondingCurveState | null> {
+  const bondingCurve = PublicKey.findProgramAddressSync(
+    [Buffer.from('bonding-curve'), tokenMint.toBuffer()],
+    PUMP_PROGRAM
+  )[0];
+
+  const account = await connection.getAccountInfo(bondingCurve);
+  if (!account) {
+    console.log(`No account info for bonding curve: ${bondingCurve.toBase58()}`);
+    return null;
+  }
+  if (!account.owner.equals(PUMP_PROGRAM)) {
+    console.log(`Account ${bondingCurve.toBase58()} is not owned by Pump.fun program`);
+    return null;
+  }
+
+  const decoded = PUMP_FUN_BONDING_CURVE_LAYOUT.decode(account.data);
+  console.log('Bonding Curve State:', {
+    virtualTokenReserves: decoded.virtualTokenReserves.toString(),
+    virtualSolReserves: decoded.virtualSolReserves.toString(),
+    realTokenReserves: decoded.realTokenReserves.toString(),
+    realSolReserves: decoded.realSolReserves.toString(),
+    tokenTotalSupply: decoded.tokenTotalSupply.toString(),
+    complete: decoded.complete === 1,
+  });
+
+  return decoded;
+}
+
+
+// Function to estimate tokens out for a given SOL amount on Pump.fun
+async function estimatePumpFunTokensOut(
+  bondingCurveInfo: any,
+  solAmount: BN
+): Promise<BN> {
+  const virtualSolReserves = new BN(bondingCurveInfo.virtualSolReserves);
+  const virtualTokenReserves = new BN(bondingCurveInfo.virtualTokenReserves);
+  const solAmountLamports = solAmount;
+
+  // Simplified constant product formula: (x * y) = k
+  // Tokens out = (virtualTokenReserves * solAmount) / (virtualSolReserves + solAmount)
+  const numerator = virtualTokenReserves.mul(solAmountLamports);
+  const denominator = virtualSolReserves.add(solAmountLamports);
+  if (denominator.eq(new BN(0))) {
+    throw new Error('Denominator cannot be zero in token out calculation');
+  }
+  return numerator.div(denominator);
+}
+
+// Function to estimate SOL out for a given token amount on Pump.fun
+async function estimatePumpFunSolOut(
+  bondingCurveInfo: any,
+  tokenAmount: BN
+): Promise<BN> {
+  const virtualSolReserves = new BN(bondingCurveInfo.virtualSolReserves);
+  const virtualTokenReserves = new BN(bondingCurveInfo.virtualTokenReserves);
+
+  // Simplified constant product formula: (x * y) = k
+  // SOL out = (virtualSolReserves * tokenAmount) / (virtualTokenReserves + tokenAmount)
+  const numerator = virtualSolReserves.mul(tokenAmount);
+  const denominator = virtualTokenReserves.add(tokenAmount);
+  if (denominator.eq(new BN(0))) {
+    throw new Error('Denominator cannot be zero in SOL out calculation');
+  }
+  return numerator.div(denominator);
+}
+
+export async function startVolumeMaker() {
+// Configuration constants
+  const MIN_SOL_BUY = 0.01; // Minimum SOL to buy
+  const MAX_SOL_BUY = 0.03; // Maximum SOL to buy
+  const INTERVAL_SECONDS = 15; // Wait time between cycles
+  const JITO_TIP_LAMPORTS = 0.001 * LAMPORTS_PER_SOL; // Jito tip amount
+  const MAX_ITERATIONS = 10; // Total number of iterations (configurable)
+
+  // Load keyInfo
+  let keyInfo: { [key: string]: any } = {};
+  if (fs.existsSync(keyInfoPath)) {
+    const existingData = fs.readFileSync(keyInfoPath, 'utf-8');
+    keyInfo = JSON.parse(existingData);
+  }
+
+  const mintPK = keyInfo.mint;
+  const mint = new PublicKey(mintPK);
+  console.log(`🚀 Mint: ${mint.toString()}`);
+
+  // Fetch bonding curve state on-chain
+  const bondingCurveState = await getPumpFunBondingCurveState(mint);
+  if (!bondingCurveState) {
+    console.log('Failed to fetch Pump.fun bonding curve state. Exiting...');
+    return;
+  }
+
+  // Check if the bonding curve is complete
+  if (bondingCurveState.complete === 1) {
+    console.log('Bonding curve is complete. Token is no longer on Pump.fun. Exiting...');
+    return;
+  }
+
+  // Derive bonding curve addresses
+  const bondingCurve = PublicKey.findProgramAddressSync(
+    [Buffer.from('bonding-curve'), mint.toBuffer()],
+    PUMP_PROGRAM
+  )[0];
+  const associatedBondingCurve = getAssociatedTokenAddressSync(
+    mint,
+    bondingCurve,
+    true,
+    TOKEN_PROGRAM_ID
+  );
+
+  // Initialize Pump.fun program for buy/sell instructions
+  const provider = new AnchorProvider(connection, payer as any, { commitment: 'confirmed' });
+  setProvider(provider);
+  const program = new Program(JSON.parse(fs.readFileSync('./pumpfun-IDL.json', 'utf-8')) as Idl, provider);
+
+  // Load or initialize volume data
+  let volumeData: VolumeData = {};
+  if (fs.existsSync(volumeFilePath)) {
+    const existingData = fs.readFileSync(volumeFilePath, 'utf-8');
+    volumeData = JSON.parse(existingData);
+  }
+
+  let iteration = Object.keys(volumeData).length + 1;
+
+  // Run for MAX_ITERATIONS or until iteration count is reached
+  for (let currentIteration = 0; currentIteration < MAX_ITERATIONS; currentIteration++) {
+    try {
+      const bundledTxns: VersionedTransaction[] = [];
+      const latestBlockhash = await connection.getLatestBlockhash();
+
+      // 1. Create new wallets
+      const buyerKp = Keypair.generate();
+      const sellerKp1 = Keypair.generate();
+      const sellerKp2 = Keypair.generate();
+
+      // Save wallet keys to volume.json
+      volumeData[iteration] = {
+        buyer: bs58.encode(buyerKp.secretKey),
+        seller1: bs58.encode(sellerKp1.secretKey),
+        seller2: bs58.encode(sellerKp2.secretKey),
+      };
+      fs.writeFileSync(volumeFilePath, JSON.stringify(volumeData, null, 2));
+
+      // 2. Fund buyer wallet with random SOL amount
+      const solBuyAmount = MIN_SOL_BUY + Math.random() * (MAX_SOL_BUY - MIN_SOL_BUY);
+      const solBuyLamports = Math.floor(solBuyAmount * LAMPORTS_PER_SOL);
+
+      const fundBuyerIx = SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: buyerKp.publicKey,
+        lamports: solBuyLamports + 1062304, // Include fee for tx
+      });
+
+      // 3. Create ATAs for all wallets
+      const buyerAta = getAssociatedTokenAddressSync(mint, buyerKp.publicKey, false, TOKEN_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID);
+      const seller1Ata = getAssociatedTokenAddressSync(mint, sellerKp1.publicKey, false, TOKEN_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID);
+      const seller2Ata = getAssociatedTokenAddressSync(mint, sellerKp2.publicKey, false, TOKEN_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID);
+
+      const createBuyerAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        buyerAta,
+        buyerKp.publicKey,
+        mint,
+        TOKEN_PROGRAM_ID,
+        spl.ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+      const createSeller1AtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        seller1Ata,
+        sellerKp1.publicKey,
+        mint,
+        TOKEN_PROGRAM_ID,
+        spl.ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+      const createSeller2AtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        seller2Ata,
+        sellerKp2.publicKey,
+        mint,
+        TOKEN_PROGRAM_ID,
+        spl.ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+
+      // 4. Pump.fun buy logic
+      const solAmountBN = new BN(solBuyLamports);
+      const amountOut = await estimatePumpFunTokensOut(bondingCurveState, solAmountBN);
+
+      const [creatorVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from('creator-vault'), payer.publicKey.toBytes()],
+        PUMP_PROGRAM
+      );
+
+      const buyIx = await program.methods
+        .buy(amountOut, solAmountBN)
+        .accounts({
+          feeRecipient,
+          mint,
+          bondingCurve,
+          associatedBondingCurve,
+          associatedUser: buyerAta,
+          user: buyerKp.publicKey,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          creatorVault,
+          eventAuthority,
+          program: PUMP_PROGRAM,
+        })
+        .instruction();
+
+      // 5. Split tokens randomly between two seller wallets
+      const fraction = 0.1 + Math.random() * 0.8; // 10-90% split
+      const firstAmount = new BN(Math.floor(amountOut.toNumber() * fraction));
+      const secondAmount = amountOut.sub(firstAmount);
+
+      const transferToSeller1Ix = spl.createTransferInstruction(
+        buyerAta,
+        seller1Ata,
+        buyerKp.publicKey,
+        firstAmount.toNumber(),
+        [],
+        TOKEN_PROGRAM_ID
+      );
+
+      const transferToSeller2Ix = spl.createTransferInstruction(
+        buyerAta,
+        seller2Ata,
+        buyerKp.publicKey,
+        secondAmount.toNumber(),
+        [],
+        TOKEN_PROGRAM_ID
+      );
+
+      // 6. Pump.fun sell logic
+      const sellIx1 = await program.methods
+        .sell(firstAmount, new BN(0))
+        .accounts({
+          feeRecipient,
+          mint,
+          bondingCurve,
+          associatedBondingCurve,
+          associatedUser: seller1Ata,
+          user: sellerKp1.publicKey,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          creatorVault,
+          eventAuthority,
+          program: PUMP_PROGRAM,
+        })
+        .instruction();
+
+      const sellIx2 = await program.methods
+        .sell(secondAmount, new BN(0))
+        .accounts({
+          feeRecipient,
+          mint,
+          bondingCurve,
+          associatedBondingCurve,
+          associatedUser: seller2Ata,
+          user: sellerKp2.publicKey,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          creatorVault,
+          eventAuthority,
+          program: PUMP_PROGRAM,
+        })
+        .instruction();
+
+      // 7. Close ATAs and return SOL
+      const closeBuyerAtaIx = createCloseAccountInstruction(
+        buyerAta,
+        payer.publicKey,
+        buyerKp.publicKey,
+        [],
+        TOKEN_PROGRAM_ID
+      );
+
+      const closeSeller1AtaIx = createCloseAccountInstruction(
+        seller1Ata,
+        payer.publicKey,
+        sellerKp1.publicKey,
+        [],
+        TOKEN_PROGRAM_ID
+      );
+
+      const closeSeller2AtaIx = createCloseAccountInstruction(
+        seller2Ata,
+        payer.publicKey,
+        sellerKp2.publicKey,
+        [],
+        TOKEN_PROGRAM_ID
+      );
+
+      // 8. Return remaining SOL from all wallets
+      const returnSolBuyerIx = SystemProgram.transfer({
+        fromPubkey: buyerKp.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: 0, // Will be updated after simulation
+      });
+
+      const returnSolSeller1Ix = SystemProgram.transfer({
+        fromPubkey: sellerKp1.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: 0, // Will be updated after simulation
+      });
+
+      const returnSolSeller2Ix = SystemProgram.transfer({
+        fromPubkey: sellerKp2.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: 0, // Will be updated after simulation
+      });
+
+      // 9. Jito tip
+      const tipIx = SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: getRandomTipAccount(),
+        lamports: JITO_TIP_LAMPORTS,
+      });
+
+      // Create transaction
+      const instructions = [
+        fundBuyerIx,
+        createBuyerAtaIx,
+        createSeller1AtaIx,
+        createSeller2AtaIx,
+        buyIx,
+        transferToSeller1Ix,
+        transferToSeller2Ix,
+        sellIx1,
+        sellIx2,
+        closeBuyerAtaIx,
+        closeSeller1AtaIx,
+        closeSeller2AtaIx,
+        returnSolBuyerIx,
+        returnSolSeller1Ix,
+        returnSolSeller2Ix,
+        tipIx,
+      ];
+
+      const message = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions,
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(message);
+      tx.sign([payer, buyerKp, sellerKp1, sellerKp2]);
+
+      // Update SOL return amounts after simulation
+      const simulation = await connection.simulateTransaction(tx, { commitment: 'processed' });
+      if (simulation.value.err) {
+        console.log('Simulation failed:', simulation.value.err);
+        continue;
+      }
+
+      // Get final balances for all wallets
+      const buyerBalance = await connection.getBalance(buyerKp.publicKey);
+      const seller1Balance = await connection.getBalance(sellerKp1.publicKey);
+      const seller2Balance = await connection.getBalance(sellerKp2.publicKey);
+
+      // Update return SOL instructions
+      const minRentExempt = await getMinimumBalanceForRentExemptAccount(connection);
+      instructions[instructions.length - 4] = SystemProgram.transfer({
+        fromPubkey: buyerKp.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: buyerBalance > minRentExempt ? buyerBalance - 5000 : 0,
+      });
+
+      instructions[instructions.length - 3] = SystemProgram.transfer({
+        fromPubkey: sellerKp1.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: seller1Balance > minRentExempt ? seller1Balance - 5000 : 0,
+      });
+
+      instructions[instructions.length - 2] = SystemProgram.transfer({
+        fromPubkey: sellerKp2.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: seller2Balance > minRentExempt ? seller2Balance - 5000 : 0,
+      });
+
+      // Recreate transaction with updated instructions
+      const finalMessage = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions,
+      }).compileToV0Message();
+
+      const finalTx = new VersionedTransaction(finalMessage);
+      finalTx.sign([payer, buyerKp, sellerKp1, sellerKp2]);
+      bundledTxns.push(finalTx);
+
+      // Send bundle
+      const bundleId = await searcherClient.sendBundle(new JitoBundle(bundledTxns, bundledTxns.length));
+      console.log(`Volume maker bundle ${bundleId} sent for iteration ${iteration}`);
+
+      // Increment iteration
+      iteration++;
+
+      // Wait for interval (skip for last iteration)
+      if (currentIteration < MAX_ITERATIONS - 1) {
+        console.log(`Waiting for ${INTERVAL_SECONDS} seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, INTERVAL_SECONDS * 1000));
+      }
+    } catch (error) {
+      console.error(`Error in volume maker cycle ${iteration}:`, error);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      iteration++;
+    }
+  }
+
+  console.log(`Completed ${MAX_ITERATIONS} volume maker iterations`);
+}
+
+
 export async function sendBundle(bundledTxns: VersionedTransaction[], mintKp: Keypair) {
 	
     // Simulate each transaction
@@ -559,34 +1046,81 @@ export async function sendBundle(bundledTxns: VersionedTransaction[], mintKp: Ke
 		const bundleId = await searcherClient.sendBundle(new JitoBundle(bundledTxns, bundledTxns.length));
 		console.log(`Bundle ${bundleId} sent.`);
 
-		await sendTelegramMsg(
-                `🎉 New Pump.fun Token Mint is LIVE on Solana Chain! 🚀\nMint: ${mintKp.publicKey.toString()}\n\nCheck it out:\n` +
-                `🌐 <a href="https://axiom.trade/t/${mintKp.publicKey.toString()}">Axiom Trade</a>\n` +
-                `📊 <a href="https://gmgn.ai/sol/token/${mintKp.publicKey.toString()}">GMGN</a>\n` +
-                `🔍 <a href="https://dexscreener.com/solana/${mintKp.publicKey.toString()}">Dexscreener</a>`
-                );
+		// Get bonding curve public key for market cap monitoring
+		const [bondingCurve] = PublicKey.findProgramAddressSync(
+		    [Buffer.from("bonding-curve"), mintKp.publicKey.toBytes()],
+		    PUMP_PROGRAM
+		);
 
-	
-	        const salePromise = new Promise<void>((resolve, reject) => {
-                setTimeout(async () => {
-                try {
-                    console.log("Executing dev wallet sale...");
-                    await sellDevWalletPF();
-                    console.log("Dev wallet tokens sold successfully.");
-                    await sendTelegramMsg(`✅ Dev wallet tokens sold for mint: ${mintKp.publicKey.toString()}`);
-                    resolve();
-                } catch (error: any) {
-                    console.error("Error during dev wallet sale:", error.message, error.stack);
-                    await sendTelegramMsg(
-                        `❌ Failed to sell dev wallet tokens for mint: ${mintKp.publicKey.toString()}\nError: ${error.message}`
-                    );
-                    reject(error);
-                }
-            }, devWalletSellDelay * 1000); // Convert seconds to milliseconds
-        });
+		// Define the three tasks to run in parallel
+		const devSalePromise = new Promise<void>((resolve, reject) => {
+		    setTimeout(async () => {
+			try {
+			    console.log("Executing dev wallet sale...");
+			    await sellDevWalletPF();
+			    console.log("Dev wallet tokens sold successfully.");
+			    await sendTelegramMsg(`✅ Dev wallet tokens sold for mint: ${mintKp.publicKey.toString()}`);
+			    resolve();
+			} catch (error: any) {
+			    console.error("Error during dev wallet sale:", error.message, error.stack);
+			    await sendTelegramMsg(
+				`❌ Failed to sell dev wallet tokens for mint: ${mintKp.publicKey.toString()}\nError: ${error.message}`
+			    );
+			    reject(error);
+			}
+		    }, devWalletSellDelay * 1000); // Convert seconds to milliseconds
+		});
 
-        // Wait for the sale to complete before allowing the process to proceed
-        await salePromise;
+		const telegramPromise = async () => {
+		    const tokenInfo = await getTokenMetadata(mintKp.publicKey.toString());
+		    if (tokenInfo) {
+			await sendTelegramMsg(
+			    `🎉 New Pump.fun Token Mint is LIVE on Solana Chain!\n 🚀 <b>Mint:</b> ${mintKp.publicKey.toString()}\n🔖 <b>Symbol:</b> ${tokenInfo.symbol}\n📛 <b>Name:</b> ${tokenInfo.name}\n🪙 <b>Description:</b> ${tokenInfo.description}\n\nCheck it out:\n` +
+			    `🌐 <a href="https://axiom.trade/t/${mintKp.publicKey.toString()}">Axiom Trade</a>\n` +
+			    `📊 <a href="https://gmgn.ai/sol/token/${mintKp.publicKey.toString()}">GMGN</a>\n` +
+			    `🔍 <a href="https://dexscreener.com/solana/${mintKp.publicKey.toString()}">Dexscreener</a>`
+			);
+		    } else {
+			await sendTelegramMsg(
+			    `🎉 New Pump.fun Token Mint is LIVE on Solana Chain! 🚀\nMint: ${mintKp.publicKey.toString()}\n\nCheck it out:\n` +
+			    `🌐 <a href="https://axiom.trade/t/${mintKp.publicKey.toString()}">Axiom Trade</a>\n` +
+			    `📊 <a href="https://gmgn.ai/sol/token/${mintKp.publicKey.toString()}">GMGN</a>\n` +
+			    `🔍 < инфраструк="https://dexscreener.com/solana/${mintKp.publicKey.toString()}">Dexscreener</a>`
+			);
+		    }
+		};
+
+		const monitorMarketCapPromise = async () => {
+		    console.log("Starting market cap monitoring...");
+		    // Get initial market cap
+		    const initialMc = await getMC(connection, bondingCurve);
+		    console.log(`Initial Market Cap (SOL): ${initialMc.toFixed(4)}`);
+
+		    // Continuously update current market cap
+		    const monitor = setInterval(async () => {
+			const currentMc = await getMC(connection, bondingCurve);
+			// Clear the current line and update
+			process.stdout.write('\r\x1b[K'); // Clear current line
+			process.stdout.write(`Current Market Cap (SOL): ${currentMc.toFixed(4)}`);
+		    }, 500);
+
+		    // Optionally, stop monitoring after a certain condition (e.g., time or manual stop)
+		    // For now, let it run indefinitely or until process is terminated
+		    return new Promise<void>(() => {}); // Keep promise alive
+		};
+
+		// Run all tasks in parallel
+		await Promise.allSettled([
+		    devSalePromise,
+		    telegramPromise(),
+		    monitorMarketCapPromise()
+		]).then((results) => {
+		    results.forEach((result, index) => {
+			if (result.status === 'rejected') {
+			    console.error(`Task ${index + 1} failed: ${result.reason}`);
+			}
+		    });
+		});
 
 		// Assuming onBundleResult returns a Promise<BundleResult>
 	/*	const result = await new Promise((resolve, reject) => {

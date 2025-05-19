@@ -1,5 +1,5 @@
 import { createKeypairs,createDevKeys, showKeypairs } from "./createKeys";
-import { buyBundle } from "./jitoPool";
+import { buyBundle, startVolumeMaker } from "./jitoPool";
 import { sender } from "./senderUI";
 import { sellBundleWalletsPF } from "./sellFunc";
 import promptSync from "prompt-sync";
@@ -42,13 +42,14 @@ async function main() {
 	console.log("║ 3. 🔍  Show all Keypairs                      ║");
 	console.log("║ 4. 📋  Launch Tools                           ║");
 	console.log("║ 5. 🛠️   Create Pool Bundle                     ║");
-	console.log("║ 6. 🚀  Sell % Supply on Pump.Fun              ║");
-	console.log("║ 7. 💰  Sell % of Supply on Raydium            ║");
+	console.log("║ 6. 🔔  Start Volume Bot Pump.Fun              ║");
+	console.log("║ 7. 🚀  Sell % Supply on Pump.Fun              ║");
+	console.log("║ 8. 💰  Sell % of Supply on Raydium            ║");
 	console.log("╠═══════════════════════════════════════════════╣");
 	console.log("║  Type 'exit' to quit.                         ║");
 	console.log("╚═══════════════════════════════════════════════╝\n");
 
-	const answer = prompt("👉 Choose between 1–7 or 'exit': ");
+	const answer = prompt("👉 Choose between 1–8 or 'exit': ");
 
 		switch (answer) {
 			case "1":
@@ -67,9 +68,12 @@ async function main() {
 				await buyBundle();
 				break;
 			case "6":
-				await sellBundleWalletsPF();
+				await startVolumeMaker();
 				break;
 			case "7":
+				await sellBundleWalletsPF();
+				break;
+			case "8":
 				await sellXPercentageRAY();
 				break;
 			case "exit":
