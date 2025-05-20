@@ -1,7 +1,7 @@
 import { AddressLookupTableProgram, Transaction,sendAndConfirmTransaction, Keypair,ComputeBudgetProgram, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL, Blockhash, AddressLookupTableAccount, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import fs from 'fs';
 import path from 'path';
-import { wallet, connection, PUMP_PROGRAM, payer } from '../config';
+import { connection, PUMP_PROGRAM, payer } from '../config';
 import promptSync from 'prompt-sync';
 import { searcherClient } from "./clients/jito";
 import { Bundle as JitoBundle } from 'jito-ts/dist/sdk/block-engine/types.js';
@@ -14,9 +14,11 @@ import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
 import bs58 from "bs58";
 import {sendTelegramMsg} from "./telegram"
 import * as readline from "readline";
+import {loadDevKeypair} from "./createKeys";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, 'keyInfo.json');
+const wallet = loadDevKeypair();
 
 const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
 
@@ -149,7 +151,9 @@ export async function extendLUT() {
     let vanityPK = null;
 
     const vanityPrompt = prompt('Do you want to import a custom vanity address? (y/n): ').toLowerCase();
-    const jitoTipAmt = +prompt('Jito tip in Sol (Ex. 0.01): ') * LAMPORTS_PER_SOL;
+    // const jitoTipAmt = +prompt('Jito tip in Sol (Ex. 0.01): ') * LAMPORTS_PER_SOL;
+    const jitoTipAmt = 0.001 * LAMPORTS_PER_SOL; // Jito tip amount
+
     if (vanityPrompt === 'y') {
         vanityPK = await promptNew(`Enter the private key of the vanity address (bs58): `);
     }
@@ -258,6 +262,10 @@ export async function extendLUT() {
         );
         accounts.push(keypair.publicKey, ataToken);
     }
+          if (!wallet) {
+            console.error('Dev wallet is required to proceed.');
+            return;
+          }
 
     // Push wallet and payer ATAs and pubkey JUST IN CASE (not sure tbh)
     const ataTokenwall = await spl.getAssociatedTokenAddress(
@@ -354,7 +362,8 @@ export async function extendLUT() {
 export async function createLUT() {
 
     // -------- step 1: ask nessesary questions for LUT build --------
-    const jitoTipAmt = +prompt('Jito tip in Sol (Ex. 0.01): ') * LAMPORTS_PER_SOL;
+    const jitoTipAmt = 0.001 * LAMPORTS_PER_SOL; // Jito tip amount
+    //const jitoTipAmt = +prompt('Jito tip in Sol (Ex. 0.01): ') * LAMPORTS_PER_SOL;
 
     // Read existing data from poolInfo.json
     let poolInfo: { [key: string]: any } = {};

@@ -1,4 +1,4 @@
-import { connection, wallet, devWalletSellDelay, PUMP_PROGRAM, feeRecipient, eventAuthority, global, MPL_TOKEN_METADATA_PROGRAM_ID, mintAuthority, rpc, payer } from "../config";
+import { connection, devWalletSellDelay, PUMP_PROGRAM, feeRecipient, eventAuthority, global, MPL_TOKEN_METADATA_PROGRAM_ID, mintAuthority, rpc, payer } from "../config";
 import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
          getAssociatedTokenAddressSync,
          createAssociatedTokenAccountIdempotentInstruction }
@@ -33,6 +33,7 @@ import { Metaplex } from "@metaplex-foundation/js";
 import { createCloseAccountInstruction, getMinimumBalanceForRentExemptAccount, getMint } from "@solana/spl-token";
 import { u8, struct } from '@solana/buffer-layout';
 import { u64, publicKey } from '@solana/buffer-layout-utils';
+import {loadDevKeypair} from "./createKeys";
 
 // Pfad zur JSON-Datei ( Passe den Dateinamen und Pfad an )
 const jsonFilePath = "./metadata/token.json";
@@ -87,6 +88,12 @@ const monitorMarketCap = (bondingCurvePub: PublicKey): Promise<boolean> => {
 
 
 export async function buyBundle() {
+	  const wallet = loadDevKeypair();
+	  if (!wallet) {
+	    console.error('Dev wallet is required to proceed.');
+	    return;
+	  }
+
 	const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
         setProvider(provider);
 	// Initialize pumpfun anchor
@@ -307,7 +314,7 @@ export async function buyBundle() {
 	bundledTxns.push(fullTX);
 
 	// -------- step 3: create swap txns --------
-	const txMainSwaps: VersionedTransaction[] = await createWalletSwaps(blockhash, keypairs, lookupTableAccount, bondingCurve, associatedBondingCurve, mintKp.publicKey, program);
+	const txMainSwaps: VersionedTransaction[] = await createWalletSwaps(blockhash, keypairs, lookupTableAccount, bondingCurve, associatedBondingCurve, mintKp.publicKey, program, wallet);
 	bundledTxns.push(...txMainSwaps);
 
 	// -------- step 4: send bundle --------
@@ -438,7 +445,8 @@ async function createWalletSwaps(
     bondingCurve: PublicKey,
     associatedBondingCurve: PublicKey,
     mint: PublicKey,
-    program: Program
+    program: Program,
+    wallet: Keypair 
 ): Promise<VersionedTransaction[]> {
     const txsSigned: VersionedTransaction[] = [];
     const chunkedKeypairs = chunkArray(keypairs, 2); // Chunk into pairs for two buy instructions per tx
@@ -1032,6 +1040,7 @@ export async function sendBundle(bundledTxns: VersionedTransaction[], mintKp: Ke
 
             if (simulationResult.value.err) {
                 console.error("Simulation error for transaction:", simulationResult.value.err);
+                simulationResult.value.logs?.forEach(log => console.log(log));
             } else {
                 console.log("Simulation success for transaction. Logs:");
                 simulationResult.value.logs?.forEach(log => console.log(log));
@@ -1056,13 +1065,13 @@ export async function sendBundle(bundledTxns: VersionedTransaction[], mintKp: Ke
 		const devSalePromise = new Promise<void>((resolve, reject) => {
 		    setTimeout(async () => {
 			try {
-			    console.log("Executing dev wallet sale...");
+			    console.log("\nExecuting dev wallet sale...");
 			    await sellDevWalletPF();
-			    console.log("Dev wallet tokens sold successfully.");
+			    console.log("\nDev wallet tokens sold successfully.");
 			    await sendTelegramMsg(`✅ Dev wallet tokens sold for mint: ${mintKp.publicKey.toString()}`);
 			    resolve();
 			} catch (error: any) {
-			    console.error("Error during dev wallet sale:", error.message, error.stack);
+			    console.error("\nError during dev wallet sale:", error.message, error.stack);
 			    await sendTelegramMsg(
 				`❌ Failed to sell dev wallet tokens for mint: ${mintKp.publicKey.toString()}\nError: ${error.message}`
 			    );
@@ -1085,28 +1094,35 @@ export async function sendBundle(bundledTxns: VersionedTransaction[], mintKp: Ke
 			    `🎉 New Pump.fun Token Mint is LIVE on Solana Chain! 🚀\nMint: ${mintKp.publicKey.toString()}\n\nCheck it out:\n` +
 			    `🌐 <a href="https://axiom.trade/t/${mintKp.publicKey.toString()}">Axiom Trade</a>\n` +
 			    `📊 <a href="https://gmgn.ai/sol/token/${mintKp.publicKey.toString()}">GMGN</a>\n` +
-			    `🔍 < инфраструк="https://dexscreener.com/solana/${mintKp.publicKey.toString()}">Dexscreener</a>`
+			    `🔍 <a href="https://dexscreener.com/solana/${mintKp.publicKey.toString()}">Dexscreener</a>`
 			);
 		    }
 		};
 
 		const monitorMarketCapPromise = async () => {
-		    console.log("Starting market cap monitoring...");
-		    // Get initial market cap
-		    const initialMc = await getMC(connection, bondingCurve);
-		    console.log(`Initial Market Cap (SOL): ${initialMc.toFixed(4)}`);
+		    return new Promise<void>(async(resolve) => {
+			console.log("Starting market cap monitoring...");
+			// Get initial market cap
+			let previousMc = await getMC(connection, bondingCurve);
+			console.log(`Initial Market Cap (SOL): ${previousMc.toFixed(4)}`);
 
-		    // Continuously update current market cap
-		    const monitor = setInterval(async () => {
-			const currentMc = await getMC(connection, bondingCurve);
-			// Clear the current line and update
-			process.stdout.write('\r\x1b[K'); // Clear current line
-			process.stdout.write(`Current Market Cap (SOL): ${currentMc.toFixed(4)}`);
-		    }, 500);
+			// Continuously update current market cap
+			const monitor = setInterval(async () => {
+			    const currentMc = await getMC(connection, bondingCurve);
+			    const percentChange = ((currentMc - previousMc) / previousMc) * 100;
+			    console.log(
+				`Current Market Cap (SOL): ${currentMc.toFixed(4)} | Change: ${percentChange.toFixed(2)}%`
+			    );
+			    previousMc = currentMc;
+			}, 500);
 
-		    // Optionally, stop monitoring after a certain condition (e.g., time or manual stop)
-		    // For now, let it run indefinitely or until process is terminated
-		    return new Promise<void>(() => {}); // Keep promise alive
+			// Stop monitoring after 60 seconds
+			setTimeout(() => {
+			    clearInterval(monitor);
+			    console.log("Market cap monitoring stopped after 60 seconds.");
+			    resolve(); // Resolve the promise
+			}, 40_000);
+		    });
 		};
 
 		// Run all tasks in parallel

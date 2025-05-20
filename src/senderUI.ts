@@ -2,7 +2,7 @@ import { ComputeBudgetProgram, Transaction, sendAndConfirmTransaction, Keypair, 
 import { loadKeypairs } from "./createKeys";
 import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, createCloseAccountInstruction, createTransferCheckedInstruction, getAssociatedTokenAddress } from "@solana/spl-token";
 import { SPL_ACCOUNT_LAYOUT, TokenAccount } from "@raydium-io/raydium-sdk";
-import { wallet, connection, payer } from "../config";
+import { connection, payer } from "../config";
 import * as spl from "@solana/spl-token";
 import { searcherClient } from "./clients/jito";
 import { Bundle as JitoBundle } from "jito-ts/dist/sdk/block-engine/types.js";
@@ -23,6 +23,7 @@ import { promises as fsPromises } from 'fs';
 import ora from "ora"
 import os from "os";
 import { Worker } from "worker_threads";
+import {loadDevKeypair} from "./createKeys";
 
 const execAsync = promisify(exec);
 
@@ -60,103 +61,43 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function calculateLaunchFees(numBundlerWallets: number, jitoTip: number = 0.001 * LAMPORTS_PER_SOL): Promise<{
-  devWalletFees: number;
-  bundlerWalletFees: number[];
-  payerWalletFees: number;
-  totalFees: number;
-}> {
-  const LAMPORTS_PER_SOL = 1_000_000_000;
-  const SIGNATURE_FEE = 0.000005 * LAMPORTS_PER_SOL; // 0.000005 SOL per signature
-  const COMPUTE_UNIT_PRICE = 220_000; // microLamports
-  const COMPUTE_UNIT_LIMIT = 350_000; // units
-  const COMPUTE_FEE = (COMPUTE_UNIT_PRICE * COMPUTE_UNIT_LIMIT) / 1_000_000; // ~0.000077 SOL
-  const ATA_FEE = 0.00203928 * LAMPORTS_PER_SOL; // ~0.00203928 SOL per ATA
-  const BONDING_CURVE_FEE = 0.00203928 * LAMPORTS_PER_SOL; // Assume same as ATA for simplicity
-  const METADATA_FEE = 0.008 * LAMPORTS_PER_SOL; // Rough estimate for metadata account
-
-  // Dev Wallet: Pool creation + buy transaction
-  const devPoolCreation = {
-    signatures: 4, // Payer, dev, mint, program (rough estimate)
-    atas: 1, // Dev wallet ATA
-    otherAccounts: 2, // Bonding curve + metadata
-    computeUnits: 1, // One transaction
-  };
-  const devBuy = {
-    signatures: 2, // Payer, dev
-    atas: 0, // ATA already created
-    otherAccounts: 0,
-    computeUnits: 1,
-  };
-  const lutCreation = {
-        signatures: 2,
-        accounts: 1, // LUT account
-        computeUnits: 1,
-    };
-  const lutFees =
-        lutCreation.signatures * SIGNATURE_FEE +
-        0.00089088 * LAMPORTS_PER_SOL + // LUT rent exemption
-        lutCreation.computeUnits * COMPUTE_FEE +
-        jitoTip; // Jito tip for 1 bundle
-  const devFees =
-    (devPoolCreation.signatures + devBuy.signatures) * SIGNATURE_FEE +
-    (devPoolCreation.atas + devBuy.atas) * ATA_FEE +
-    devPoolCreation.otherAccounts * BONDING_CURVE_FEE +
-    METADATA_FEE +
-    (devPoolCreation.computeUnits + devBuy.computeUnits) * COMPUTE_FEE;
-
-  // Bundler Wallets: Each has one buy transaction
-  const bundlerBuy = {
-    signatures: 2, // Payer, bundler
-    atas: 1, // One ATA per wallet
-    otherAccounts: 0,
-    computeUnits: 1,
-  };
-  const bundlerFees = Array(numBundlerWallets).fill(
-    bundlerBuy.signatures * SIGNATURE_FEE +
-      bundlerBuy.atas * ATA_FEE +
-      bundlerBuy.otherAccounts * BONDING_CURVE_FEE +
-      bundlerBuy.computeUnits * COMPUTE_FEE
-  );
-
-  // Payer Wallet: Signs all transactions + pays Jito tips
-  const numBundles = 1 + Math.ceil(numBundlerWallets / 6); // 1 for pool creation + buy, additional for bundler wallet chunks (6 per chunk)
-  const payerFees =
-    (devPoolCreation.signatures + devBuy.signatures + numBundlerWallets * bundlerBuy.signatures) * SIGNATURE_FEE +
-    numBundles * jitoTip;
-
-  // Total Fees
-  const totalFees = devFees + bundlerFees.reduce((sum, fee) => sum + fee, 0) + payerFees + lutFees;
-
-  return {
-    devWalletFees: devFees / LAMPORTS_PER_SOL, // Convert to SOL
-    bundlerWalletFees: bundlerFees.map(fee => fee / LAMPORTS_PER_SOL), // Array of fees in SOL
-    payerWalletFees: payerFees + lutFees / LAMPORTS_PER_SOL, // In SOL
-    totalFees: totalFees / LAMPORTS_PER_SOL, // In SOL
-  };
-}
-
 async function showBundleAndDevBalance() {
-    const keypairs: Keypair[] = loadKeypairs();
+ const keypairs: Keypair[] = loadKeypairs();
+    const wallet = loadDevKeypair();
+    if (!wallet) {
+        console.error('Dev wallet is required to proceed.');
+        return;
+    }
+
     let existingData: any = {};
     if (fs.existsSync(keyInfoPath)) {
         existingData = JSON.parse(fs.readFileSync(keyInfoPath, "utf-8"));
     }
 
-    const fees = await calculateLaunchFees(keypairs.length, 0.001 * LAMPORTS_PER_SOL);
+    let totalSolRequiredForPayer = 0;
+    let totalFees = 0;
 
-    let totalSolRequiredForPayer = 0; // Variable zur Speicherung des Gesamt-SOL-Bedarfs
+    // Helper function to calculate fees from transferred amount
+    const calculateFees = (transferredSol: number, expectedSol: number): number => {
+        return transferredSol - expectedSol;
+    };
 
     // Dev Wallet
-    const devSolAmount = parseFloat(existingData[wallet.publicKey.toString()]?.solAmount || 0);
+    const devExpectedSol = parseFloat(existingData[wallet.publicKey.toString()]?.solAmount || 0);
+    // Überwiesener Betrag aus generateATAandSOL (solAmount * 1.015 + 0.01)
+    const devTransferredSol = devExpectedSol * 1.015 + 0.01;
+    const devFees = calculateFees(devTransferredSol, devExpectedSol);
     const devBalance = await connection.getBalance(wallet.publicKey);
-    const devTotalRequired = devSolAmount + fees.devWalletFees + fees.devWalletFees; // Erwartete SOL + Fees
-    totalSolRequiredForPayer += devTotalRequired; // Zum Gesamtbedarf hinzufügen
+    const devTotalRequired = devTransferredSol; // Überwiesener Betrag ist der Gesamtbedarf
+    totalSolRequiredForPayer += devTotalRequired;
+    totalFees += devFees;
+
     console.log(`\n=== Dev Wallet ===`);
     console.log(`Public Key: ${wallet.publicKey.toBase58()}`);
     console.log(`Current Balance: ${(devBalance / LAMPORTS_PER_SOL).toFixed(3)} SOL`);
-    console.log(`Buy SOL: ${devSolAmount.toFixed(3)} SOL`);
-    console.log(`Total Required (Expected + Fees): ${devTotalRequired.toFixed(3)} SOL`);
+    console.log(`Buy SOL: ${devExpectedSol.toFixed(3)} SOL`);
+    console.log(`Total Transferred: ${devTotalRequired.toFixed(3)} SOL`);
+    console.log(`Sufficient Balance: ${devBalance / LAMPORTS_PER_SOL >= devTotalRequired ? chalk.green('Yes') : chalk.red('No')}`);
 
     // Bundle Wallets
     for (let i = 0; i < keypairs.length; i++) {
@@ -167,28 +108,44 @@ async function showBundleAndDevBalance() {
             console.log(`Missing solAmount for wallet ${i + 1}, skipping.`);
             continue;
         }
-        const solAmount = parseFloat(existingData[keypairPubkeyStr].solAmount);
+
+        const expectedSol = parseFloat(existingData[keypairPubkeyStr].solAmount);
+        // Überwiesener Betrag aus generateATAandSOL
+        const transferredSol = expectedSol * 1.015 + 0.01;
+        const fees = calculateFees(transferredSol, expectedSol);
         const balance = await connection.getBalance(keypair.publicKey);
-        const bundlerTotalRequired = solAmount + fees.bundlerWalletFees[i] + fees.bundlerWalletFees[i]; // Erwartete SOL + Fees
-        totalSolRequiredForPayer += bundlerTotalRequired; // Zum Gesamtbedarf hinzufügen
-        console.log(`\nBundler Wallet ${i + 1}`);
+        const totalRequired = transferredSol;
+        totalSolRequiredForPayer += totalRequired;
+        totalFees += fees;
+
+        console.log(`\n=== Bundler Wallet ${i + 1} ===`);
         console.log(`Public Key: ${keypair.publicKey.toBase58()}`);
         console.log(`Current Balance: ${(balance / LAMPORTS_PER_SOL).toFixed(3)} SOL`);
-        console.log(`Buy SOL: ${solAmount.toFixed(3)} SOL`);
-        console.log(`Total Required (Expected + Fees): ${bundlerTotalRequired.toFixed(3)} SOL`);
+        console.log(`Buy SOL: ${expectedSol.toFixed(3)} SOL`);
+        console.log(`Total Transferred: ${totalRequired.toFixed(3)} SOL`);
+        console.log(`Sufficient Balance: ${balance / LAMPORTS_PER_SOL >= totalRequired ? chalk.green('Yes') : chalk.red('No')}`);
     }
 
     // Payer Wallet
-    console.log(`\n=== Payer Wallet ===`);
     const payerBalance = await connection.getBalance(payer.publicKey);
+    const jitoTip = 0.001; // Jito-Tip pro Bundle (aus generateATAandSOL)
+    const numBundles = 1 + Math.ceil(keypairs.length / 45); // Schätzung der Bundles
+    const payerFees = jitoTip * numBundles;
+    totalFees += payerFees;
+    totalSolRequiredForPayer += payerFees;
+
+    console.log(`\n=== Payer Wallet ===`);
     console.log(`Public Key: ${payer.publicKey.toBase58()}`);
     console.log(`Current Balance: ${(payerBalance / LAMPORTS_PER_SOL).toFixed(3)} SOL`);
-    console.log(`Total SOL Required for All Wallets (Expected + Fees) on Payer Wallet for Launch: ${totalSolRequiredForPayer.toFixed(3)} SOL`);
-    console.log(`\n=== Total Estimated Fees for Launch ===`);
-    console.log(`Total Fees with jitoTip 0.001 used for Launch: ${fees.totalFees.toFixed(3)} SOL`);
+    console.log(`Total SOL Required (Buys + Fees): ${totalSolRequiredForPayer.toFixed(3)} SOL`);
+    console.log(`Estimated Payer Fees (Jito Tips): ${payerFees.toFixed(3)} SOL`);
+    console.log(`Sufficient Balance: ${payerBalance / LAMPORTS_PER_SOL >= totalSolRequiredForPayer ? chalk.green('Yes') : chalk.red('No')}`);
+
+    console.log(`\n=== Total Estimated Fees ===`);
+    console.log(`Total Fees (Extra Transferred + Jito Tips): ${totalFees.toFixed(3)} SOL`);
 }
 
-async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = NUM_OF_WALLETS): Promise<TransactionInstruction[]> {
+async function generateSOLTransferForKeypairs(tipAmt: number, wallet: Keypair, steps: number = NUM_OF_WALLETS): Promise<TransactionInstruction[]> {
 	const keypairs: Keypair[] = loadKeypairs();
 	const ixs: TransactionInstruction[] = [];
 
@@ -223,7 +180,7 @@ async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = NU
 
 	const solAmount = parseFloat(existingData[wallet.publicKey.toString()].solAmount);
 
-        let completeSolNeeded = (solAmount * 1.015 + 0.0025) + completeSolAmountKeypairs;
+        let completeSolNeeded = (solAmount * 1.015 + 0.01) + completeSolAmountKeypairs;
 
 	let currentSolBalance = await connection.getBalance(payer.publicKey);
 
@@ -258,10 +215,10 @@ async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = NU
 		SystemProgram.transfer({
 			fromPubkey: payer.publicKey,
 			toPubkey: wallet.publicKey,
-			lamports: Math.floor((solAmount * 1.015 + 0.0025) * LAMPORTS_PER_SOL),
+			lamports: Math.floor((solAmount * 1.015 + 0.01) * LAMPORTS_PER_SOL),
 		})
 	);
-	console.log(`\nSent ${(solAmount * 1.015 + 0.0025).toFixed(3)} SOL to Dev Wallet (${wallet.publicKey.toString()})`);
+	console.log(`\nSent ${(solAmount * 1.015 + 0.01).toFixed(3)} SOL to Dev Wallet (${wallet.publicKey.toString()})`);
 
 
 	// Loop through the keypairs and process each one
@@ -281,10 +238,10 @@ async function generateSOLTransferForKeypairs(tipAmt: number, steps: number = NU
 				SystemProgram.transfer({
 					fromPubkey: payer.publicKey,
 					toPubkey: keypair.publicKey,
-					lamports: Math.floor((solAmount * 1.015 + 0.0025) * LAMPORTS_PER_SOL),
+					lamports: Math.floor((solAmount * 1.015 + 0.01) * LAMPORTS_PER_SOL),
 				})
 			);
-			console.log(`Sent ${(solAmount * 1.015 + 0.0025).toFixed(3)} SOL to Wallet ${i + 1} (${keypair.publicKey.toString()})`);
+			console.log(`Sent ${(solAmount * 1.015 + 0.01).toFixed(3)} SOL to Wallet ${i + 1} (${keypair.publicKey.toString()})`);
 		} catch (error) {
 			console.error(`Error creating transfer instruction for wallet ${i + 1}:`, error);
 			continue;
@@ -405,9 +362,14 @@ async function sendBundle(txns: VersionedTransaction[]) {
 }
 
 async function generateATAandSOL() {
-	const jitoTipAmt = +prompt("Jito tip in Sol (Ex. 0.01): ") * LAMPORTS_PER_SOL;
+	const jitoTipAmt = 0.001 * LAMPORTS_PER_SOL;
+        const wallet = loadDevKeypair();
+          if (!wallet) {
+            console.error('Dev wallet is required to proceed.');
+            return;
+          }
 
-	const solIxs = await generateSOLTransferForKeypairs(jitoTipAmt);
+	const solIxs = await generateSOLTransferForKeypairs(jitoTipAmt, wallet);
 
 	const { blockhash } = await connection.getLatestBlockhash();
 	const sendTxns: VersionedTransaction[] = [];
@@ -769,6 +731,11 @@ async function simulateAndWriteBuys() {
 
 		// Abfrage, ob fixe oder zufällige Beträge verwendet werden sollen
                 const mode = await promptNew(`Enter the mode for SOL amounts (fix/random): `);
+	       const wallet = loadDevKeypair();
+		  if (!wallet) {
+		    console.error('Dev wallet is required to proceed.');
+		    return;
+		  }
 	
 		for (let it = 0; it <= NUM_OF_WALLETS; it++) { 
 			let keypair;
@@ -777,7 +744,7 @@ async function simulateAndWriteBuys() {
 			if (it === 0) {
 			    // Dev Wallet: Immer fixe Eingabe
 			    solInput = await promptNew(`Enter the amount of SOL for dev wallet: `);
-			    solInput = Number(solInput) * 1.21;
+			    solInput = Number(solInput);
 			    keypair = wallet;
 			} else {
 			    if (mode === 'fix') {

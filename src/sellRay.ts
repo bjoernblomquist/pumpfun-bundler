@@ -1,4 +1,4 @@
-import { connection, rpc, wallet, payer, RayLiqPoolv4 } from "../config";
+import { connection, rpc, NUM_OF_WALLETS, payer, RayLiqPoolv4 } from "../config";
 import { PublicKey, VersionedTransaction, SYSVAR_RENT_PUBKEY, TransactionMessage, SystemProgram, Keypair, LAMPORTS_PER_SOL, TransactionInstruction } from "@solana/web3.js";
 import { loadKeypairs } from "./createKeys";
 import { searcherClient } from "./clients/jito";
@@ -13,7 +13,7 @@ import { randomInt } from "crypto";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import { derivePoolKeys, IPoolKeys } from "./clients/poolKeysReassigned";
-import {NUM_OF_WALLETS} from "../config";
+import {loadDevKeypair} from "./createKeys";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -107,6 +107,11 @@ export async function sellXPercentageRAY() {
 		console.log("Keys not found!");
 		process.exit(0);
 	}
+        const wallet = loadDevKeypair();
+          if (!wallet) {
+            console.error('Dev wallet is required to proceed.');
+            return;
+          }
 
 	const mintInfo = await connection.getTokenSupply(mintKp.publicKey);
 

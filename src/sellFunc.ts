@@ -1,4 +1,4 @@
-import { connection, rpc, wallet, global, feeRecipient, PUMP_PROGRAM, payer } from "../config";
+import { connection, rpc, NUM_OF_WALLETS, global, feeRecipient, PUMP_PROGRAM, payer } from "../config";
 import { PublicKey, VersionedTransaction, SYSVAR_RENT_PUBKEY, TransactionMessage, SystemProgram, Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { loadKeypairs } from "./createKeys";
 import { searcherClient } from "./clients/jito";
@@ -12,7 +12,7 @@ import { randomInt } from "crypto";
 import { getRandomTipAccount } from "./clients/config";
 import BN from "bn.js";
 import { Program, Idl, AnchorProvider, setProvider } from "@coral-xyz/anchor";
-import {NUM_OF_WALLETS} from "../config";
+import {loadDevKeypair} from "./createKeys";
 
 const prompt = promptSync();
 const keyInfoPath = path.join(__dirname, "keyInfo.json");
@@ -74,6 +74,12 @@ async function sendBundle(bundledTxns: VersionedTransaction[]) {
 }
 
 export async function sellBundleWalletsPF() {
+	  const wallet = loadDevKeypair();
+          if (!wallet) {
+            console.error('Dev wallet is required to proceed.');
+            return;
+          }
+
     const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
     setProvider(provider);
 
@@ -205,6 +211,12 @@ export async function sellBundleWalletsPF() {
 }
 
 export async function sellDevWalletPF() {
+	  const wallet = loadDevKeypair();
+          if (!wallet) {
+            console.error('Dev wallet is required to proceed.');
+            return;
+          }
+
     const provider = new AnchorProvider(connection, wallet as any, { commitment: "confirmed" });
     setProvider(provider);
 

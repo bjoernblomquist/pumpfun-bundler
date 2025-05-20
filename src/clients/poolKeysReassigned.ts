@@ -3,8 +3,9 @@ import { Market } from '@openbook-dex/openbook';
 import { AccountInfo, PublicKey } from '@solana/web3.js';
 import { u8, u32, struct } from '@solana/buffer-layout';
 import { u64, publicKey } from '@solana/buffer-layout-utils';
-import { RayLiqPoolv4, connection, wallet } from '../../config';
+import { RayLiqPoolv4, connection  } from '../../config';
 import { ApiPoolInfoV4 } from "@raydium-io/raydium-sdk";
+import {loadDevKeypair} from "../createKeys";
 
 const openbookProgram = new PublicKey('srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX');
 
@@ -65,6 +66,12 @@ function getVaultSigner(marketId: { toBuffer: any }, marketDeco: { vaultSignerNo
 }
 
 export async function derivePoolKeys(marketId: PublicKey) {
+  const wallet = loadDevKeypair();
+          if (!wallet) {
+            console.error('Dev wallet is required to proceed.');
+            return;
+          }
+
   const marketInfo = await getMarketInfo(marketId);
   if (!marketInfo) return null;
   const marketDeco = await getDecodedData(marketInfo);
